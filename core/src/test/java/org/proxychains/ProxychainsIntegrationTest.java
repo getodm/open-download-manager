@@ -4,17 +4,16 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import org.awaitility.Awaitility;
 import static org.awaitility.Awaitility.await;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -38,17 +36,20 @@ import org.manager.download.Download;
 import org.manager.download.DownloadListener;
 import org.manager.download.DownloadSettingsFactory;
 import org.manager.download.handler.ProxychainsDownloadHandler;
-import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import org.mockito.Mock;
-import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.mockito.MockitoAnnotations;
-import org.tor.TorService;
+import utils.SocksHttpServer;
 
 /**
  * Integration tests for Proxychains package. Tests the interaction between
  * ProxychainsClient, ProxychainsConfig, ProxychainsDownloadHandler, and
- * ProxychainsSettings in realistic scenarios.
+ * ProxychainsSettings using real tools and loopback SOCKS5 endpoints.
  *
  * Note: Some tests require proxychains to be installed on the system. Use
  * SKIP_PROXYCHAINS_INTEGRATION=true to skip tests requiring actual proxychains
@@ -56,17 +57,6 @@ import org.tor.TorService;
  */
 @DisplayName("Proxychains Integration Tests")
 class ProxychainsIntegrationTest {
-
-    private static final TorService torService = new TorService("tor");
-
-    private static final String TEST_CONFIG_CONTENT = "dynamic_chain\n"
-            + "proxy_dns\n"
-            + "tcp_read_time_out 15000\n"
-            + "tcp_connect_time_out 8000\n"
-            + "\n"
-            + "[ProxyList]\n"
-            + "# Mock SOCKS5 proxy for testing\n"
-            + "socks5 127.0.0.1 9999\n";
 
     @TempDir
     Path tempDir;
@@ -121,16 +111,6 @@ class ProxychainsIntegrationTest {
         if (mocks != null) {
             mocks.close();
         }
-    }
-
-    @BeforeAll
-    static void startTorService() {
-        assertTrue(torService.start().join());
-    }
-
-    @AfterAll
-    static void stopTorService() {
-        assertTrue(torService.stop());
     }
 
     @Test
@@ -318,149 +298,84 @@ class ProxychainsIntegrationTest {
     @EnabledIfEnvironmentVariable(named = "PROXYCHAINS_AVAILABLE", matches = "true")
     @DisplayName("Should work with actual proxychains installation")
     @Timeout(30)
-    void shouldWorkWithActualProxychainsInstallation() throws IOException, InterruptedException {
-        // This test only runs if proxychains is actually available
+    void shouldWorkWithActualProxychainsInstallation() throws Exception {
         assertTrue(ProxychainsClient.isProxychainsAvailable(), "Proxychains should be available for this test");
+        try (var proxy = new SocksHttpServer(false, "native proxychains payload")) {
+            Path configFile = new ProxychainsConfig()
+                    .setChainType(ProxychainsConfig.ChainType.STRICT)
+                    .setProxyDns(true)
+                    .addProxy(ProxychainsConfig.ProxyType.SOCKS5, "127.0.0.1", proxy.port())
+                    .createTempConfig();
+            client = new ProxychainsClient("proxychains4", configFile.toString());
+            try {
+                Download download = new Download(URI.create("http://native.odm.invalid/test-download.bin"));
+                download.setDestination(tempDir);
+                download.setName("test-download.bin");
+                download.setConnections(1);
+                client.startDownload(download, mockListener, Map.of()).get(10, TimeUnit.SECONDS);
 
-        // Create a real config file
-        Path configFile = tempDir.resolve("proxychains-test.conf");
-        Files.writeString(configFile, TEST_CONFIG_CONTENT);
-
-        client = new ProxychainsClient("proxychains4", configFile.toString());
-
-        // Create a simple download that should fail quickly (due to invalid proxy)
-        // but still exercise the proxychains integration
-        Download download = new Download(URI.create("https://httpbin.org/bytes/100"));
-        download.setDestination(tempDir);
-        download.setName("test-download.bin");
-
-        CountDownLatch errorLatch = new CountDownLatch(1);
-        AtomicReference<String> errorMessage = new AtomicReference<>();
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                // Expected
+                verify(mockListener, timeout(10000)).onDownloadComplete(download);
+                assertEquals(Download.Status.COMPLETED, download.getStatus());
+                assertEquals("native proxychains payload", Files.readString(tempDir.resolve(download.getName())));
+                assertEquals(Set.of("native.odm.invalid"), Set.copyOf(proxy.hosts));
+                assertEquals(Set.of("/test-download.bin"), Set.copyOf(proxy.requestTargets));
+                assertTrue(proxy.failures.isEmpty(), proxy.failures.toString());
+                verify(mockListener, never()).onDownloadError(eq(download), anyString());
+            } finally {
+                client.shutdown();
+                Files.deleteIfExists(configFile);
             }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                // May or may not happen depending on proxy availability
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-                // Not expected in this test
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-                // Not expected in this test
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                // Not expected due to invalid proxy
-            }
-
-            @Override
-            public void onDownloadError(Download download, String error) {
-                errorMessage.set(error);
-                errorLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                // Not expected in this test
-            }
-        };
-
-        Map<String, String> options = new HashMap<>();
-        options.put("aria2.timeout", "5"); // Quick timeout
-
-        client.startDownload(download, testListener, options);
-
-        // Should get an error due to invalid proxy configuration
-        assertTrue(errorLatch.await(20, TimeUnit.SECONDS), "Should receive error callback");
-        assertNotNull(errorMessage.get());
-        assertTrue(errorMessage.get().length() > 0);
+        }
     }
 
     @Test
     @DisabledIfEnvironmentVariable(named = "SKIP_PROXYCHAINS_INTEGRATION", matches = "true")
     @DisplayName("Should handle concurrent downloads with different configurations")
     @Timeout(20)
-    void shouldHandleConcurrentDownloadsWithDifferentConfigurations() throws InterruptedException {
+    void shouldHandleConcurrentDownloadsWithDifferentConfigurations() throws Exception {
         handler = new ProxychainsDownloadHandler(mockGlobalSettings, mockSettingsFactory, executorService, ApplicationContext.getToolManagerFactory());
-
-        int numberOfDownloads = 3;
-        CountDownLatch completionLatch = new CountDownLatch(numberOfDownloads);
-
-        for (int i = 0; i < numberOfDownloads; i++) {
-            final int downloadIndex = i;
-
-            // Create different configurations for each download
-            ProxychainsConfig config = new ProxychainsConfig()
-                    .setChainType(ProxychainsConfig.ChainType.values()[i % 3])
-                    .addProxy(ProxychainsConfig.ProxyType.SOCKS5, "127.0.0.1", 9000 + i);
-
-            URI testUri = URI.create("https://httpbin.org/bytes/" + (100 * (i + 1)));
-
-            Map<String, String> options = new HashMap<>();
-            options.put("aria2.max-connection-per-server", String.valueOf(i + 1));
-            options.put("download.index", String.valueOf(downloadIndex));
-
-            DownloadListener listener = new DownloadListener() {
-                @Override
-                public void onDownloadStart(Download download) {
-                    // Track start
+        handler.addDownloadListener(mockListener);
+        handler.initialize().get(10, TimeUnit.SECONDS);
+        CountDownLatch responseReady = new CountDownLatch(1);
+        try (var first = new SocksHttpServer(false, "payload 0", responseReady);
+                var second = new SocksHttpServer(false, "payload 1", responseReady);
+                var third = new SocksHttpServer(false, "payload 2", responseReady)) {
+            var proxies = java.util.List.of(first, second, third);
+            var downloads = new ArrayList<Download>();
+            try {
+                for (int i = 0; i < proxies.size(); i++) {
+                    Download download = new Download(URI.create("http://route" + i + ".odm.invalid/file" + i + ".bin"));
+                    download.setDestination(tempDir);
+                    download.setName("file" + i + ".bin");
+                    download.setType(Download.Type.PROXYCHAINS);
+                    download.setProxyAddress("socks5h://127.0.0.1:" + proxies.get(i).port());
+                    download.setUseProxy(true);
+                    download.setConnections(1);
+                    downloads.add(download);
+                    handler.startDownload(download).get(10, TimeUnit.SECONDS);
                 }
+                await().atMost(10, TimeUnit.SECONDS)
+                        .until(() -> proxies.stream().allMatch(proxy -> !proxy.requestTargets.isEmpty()));
+                assertEquals(proxies.size(), handler.getActiveDownloadCount());
+                responseReady.countDown();
 
-                @Override
-                public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                        float speed) {
-                    // Track progress
+                for (int i = 0; i < downloads.size(); i++) {
+                    Download download = downloads.get(i);
+                    verify(mockListener, timeout(10000)).onDownloadComplete(download);
+                    assertEquals(Download.Status.COMPLETED, download.getStatus());
+                    assertEquals("payload " + i, Files.readString(tempDir.resolve(download.getName())));
+                    assertEquals(Set.of(download.getUri().getHost()), Set.copyOf(proxies.get(i).hosts));
+                    assertEquals(Set.of(download.getUri().getPath()), Set.copyOf(proxies.get(i).requestTargets));
+                    assertTrue(proxies.get(i).failures.isEmpty(), proxies.get(i).failures.toString());
+                    verify(mockListener, never()).onDownloadError(eq(download), anyString());
+                    verify(mockListener, never()).onDownloadCanceled(download);
                 }
-
-                @Override
-                public void onDownloadPause(Download download) {
-                }
-
-                @Override
-                public void onDownloadResume(Download download) {
-                }
-
-                @Override
-                public void onDownloadComplete(Download download) {
-                    completionLatch.countDown();
-                }
-
-                @Override
-                public void onDownloadError(Download download, String errorMessage) {
-                    // Expected due to invalid proxy - count as completion for test purposes
-                    completionLatch.countDown();
-                }
-
-                @Override
-                public void onDownloadCanceled(Download download) {
-                    completionLatch.countDown();
-                }
-            };
-
-            handler.addDownloadListener(listener);
-            Download download = handler.download(testUri, tempDir, options);
-
-            assertNotNull(download);
-            assertEquals(Download.Type.PROXYCHAINS, download.getType());
+                await().atMost(5, TimeUnit.SECONDS).until(() -> handler.getActiveDownloadCount() == 0);
+            } finally {
+                responseReady.countDown();
+                handler.shutdown().get(10, TimeUnit.SECONDS);
+            }
         }
-
-        // All downloads should complete (or error) within timeout
-        assertTrue(completionLatch.await(15, TimeUnit.SECONDS),
-                "All downloads should complete within timeout");
-
-        // Clean up
-        await().atMost(Duration.ofSeconds(5)).until(() -> handler.getActiveDownloadCount() == 0);
     }
 
     @Test

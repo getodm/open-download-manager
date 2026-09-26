@@ -1,39 +1,36 @@
 package org.proxychains;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
-import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import okhttp3.mockwebserver.SocketPolicy;
+import okio.Buffer;
 import static org.awaitility.Awaitility.await;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.DisabledIfEnvironmentVariable;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -43,83 +40,66 @@ import org.manager.download.Download;
 import org.manager.download.DownloadListener;
 import org.manager.download.DownloadSettingsFactory;
 import org.manager.download.handler.ProxychainsDownloadHandler;
-
-import org.mockito.Mock;
-import static org.mockito.Mockito.when;
-import org.mockito.MockitoAnnotations;
-import org.tor.TorService;
+import org.mockito.ArgumentCaptor;
+import static org.mockito.ArgumentMatchers.anyFloat;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import utils.SocksHttpServer;
 
 /**
- * End-to-end tests for Proxychains package. Tests complete download workflows
- * using real or mocked network services.
- *
- * These tests verify the entire proxychains download pipeline from
- * configuration to completion, including error handling and edge cases.
- *
- * Note: Some tests require actual proxychains installation and network access.
- * Use environment variables to control test execution: -
- * PROXYCHAINS_AVAILABLE=true for tests requiring proxychains -
- * SKIP_E2E_TESTS=true to skip all E2E tests - ENABLE_NETWORK_TESTS=true for
- * tests requiring network access
+ * Complete workflows through real proxychains4 and aria2 processes, using local
+ * SOCKS5 and HTTP servers. The .invalid host requires the configured proxy to
+ * resolve the destination, without Tor, public DNS, or internet access.
  */
 @DisplayName("Proxychains E2E Tests")
 @DisabledIfEnvironmentVariable(named = "SKIP_E2E_TESTS", matches = "true")
+@Timeout(30)
 class ProxychainsE2ETest {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(ProxychainsE2ETest.class);
-
+    private static final String TEST_HOST = "e2e.odm.invalid";
     private static final String TEST_FILE_CONTENT = "This is a test file for download testing.\n".repeat(100);
-    private static final int TEST_FILE_SIZE = TEST_FILE_CONTENT.length();
-    private static final TorService torService = new TorService("tor");
 
     @TempDir
     Path tempDir;
 
-    @Mock
-    private GlobalSettings mockGlobalSettings;
-
-    @Mock
-    private DownloadSettingsFactory mockSettingsFactory;
-
     private MockWebServer mockWebServer;
+    private SocksHttpServer proxy;
     private ProxychainsDownloadHandler handler;
-    private ProxychainsConfig testConfig;
-    private ProxychainsClient client;
     private ExecutorService executorService;
-    private AutoCloseable mocks;
+    private DownloadListener listener;
 
     @BeforeEach
-    void setUp() throws IOException {
-        mocks = MockitoAnnotations.openMocks(this);
+    void setUp() throws Exception {
         executorService = Executors.newCachedThreadPool();
-
-        // Setup mock global settings
-        when(mockGlobalSettings.getProxychainsPath()).thenReturn("proxychains4");
-        when(mockGlobalSettings.getDefaultDownloadDirectory()).thenReturn(tempDir);
-
+        GlobalSettings settings = new GlobalSettings()
+                .setProxychainsPath("proxychains4")
+                .setDefaultDownloadDirectory(tempDir);
         ApplicationContext.initialize();
-        handler = new ProxychainsDownloadHandler(mockGlobalSettings, mockSettingsFactory, executorService,
-                ApplicationContext.getToolManagerFactory());
+        handler = new ProxychainsDownloadHandler(settings, new DownloadSettingsFactory(settings),
+                executorService, ApplicationContext.getToolManagerFactory());
+        listener = mock(DownloadListener.class);
+        handler.addDownloadListener(listener);
+        handler.initialize().get(10, TimeUnit.SECONDS);
 
-        // Start mock web server
         mockWebServer = new MockWebServer();
         mockWebServer.start();
-
-        // Create test configuration with mock proxy
-        testConfig = new ProxychainsConfig()
-                .setChainType(ProxychainsConfig.ChainType.DYNAMIC)
-                .setProxyDns(true)
-                .setTcpReadTimeout(10000)
-                .setTcpConnectTimeout(5000)
-                .addProxy(ProxychainsConfig.ProxyType.SOCKS5, "127.0.0.1", 9999); // Invalid proxy for testing
-
-        // Handler already initialized above
+        proxy = new SocksHttpServer(new InetSocketAddress("127.0.0.1", mockWebServer.getPort()));
     }
 
     @AfterEach
     void tearDown() throws Exception {
         if (handler != null) {
-            handler.shutdown().join();
+            handler.shutdown().get(10, TimeUnit.SECONDS);
+        }
+        if (proxy != null) {
+            proxy.close();
         }
         if (mockWebServer != null) {
             mockWebServer.shutdown();
@@ -127,758 +107,302 @@ class ProxychainsE2ETest {
         if (executorService != null) {
             executorService.shutdownNow();
         }
-        if (mocks != null) {
-            mocks.close();
-        }
-    }
-
-    @BeforeAll
-    static void startTorService() {
-        assertTrue(torService.start().join());
-    }
-
-    @AfterAll
-    static void stopTorService() {
-        assertTrue(torService.stop());
     }
 
     @Test
     @DisplayName("Should complete full download workflow with successful response")
-    @EnabledIfEnvironmentVariable(named = "PROXYCHAINS_AVAILABLE", matches = "true")
-    @Timeout(30)
-    void shouldCompleteFullDownloadWorkflowWithSuccessfulResponse() throws InterruptedException {
-        assertDoesNotThrow(() -> handler.initialize().join());
+    void shouldCompleteFullDownloadWorkflowWithSuccessfulResponse() throws Exception {
+        // Send multiple aria2 read buffers over several progress intervals.
+        String content = TEST_FILE_CONTENT.repeat(256);
+        mockWebServer.enqueue(new MockResponse().setBody(content)
+                .throttleBody(16 * 1024, 100, TimeUnit.MILLISECONDS));
+        Download download = newDownload("test-file.txt", proxy);
 
-        // Set up mock server response
-        mockWebServer.enqueue(new MockResponse()
-                .setBody(TEST_FILE_CONTENT)
-                .setHeader("Content-Length", TEST_FILE_SIZE)
-                .setHeader("Content-Type", "text/plain"));
+        handler.startDownload(download).get(10, TimeUnit.SECONDS);
+        assertCompleted(download, content);
+        assertRoutedRequest("/test-file.txt");
 
-        URI downloadUri = URI.create(mockWebServer.url("/test-file.txt").toString());
-
-        CountDownLatch completionLatch = new CountDownLatch(1);
-        AtomicBoolean downloadStarted = new AtomicBoolean(false);
-        AtomicBoolean progressReceived = new AtomicBoolean(false);
-        AtomicReference<String> errorMessage = new AtomicReference<>();
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                downloadStarted.set(true);
-                assertEquals(Download.Type.PROXYCHAINS, download.getType());
-                assertEquals(downloadUri, download.getUri());
-            }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                progressReceived.set(true);
-                assertTrue(progress >= 0 && progress <= 100);
-                assertTrue(downloadedBytes >= 0);
-                assertTrue(speed >= 0);
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-                fail("Download should not be paused in this test");
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-                fail("Download should not be resumed in this test");
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                completionLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadError(Download download, String error) {
-                errorMessage.set(error);
-                completionLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                fail("Download should not be canceled in this test");
-            }
-        };
-
-        handler.addDownloadListener(testListener);
-
-        // Configure download options
-        Map<String, String> options = new HashMap<>();
-        options.put("aria2.max-connection-per-server", "1");
-        options.put("aria2.split", "1");
-        options.put("aria2.timeout", "10");
-
-        // Start download
-        Download download = handler.download(downloadUri, tempDir, options);
-
-        assertNotNull(download);
-        assertEquals(Download.Type.PROXYCHAINS, download.getType());
-
-        // Wait for the workflow to settle. The mock server is on localhost
-        // and the proxy chain is real tor (which denies loopback targets),
-        // so the expected outcome is the ERROR path — what this test
-        // verifies is the full real-proxychains + aria2 workflow and the
-        // error surfacing through the listener chain. The synchronous
-        // isActive/count assertions the test once had race any
-        // fast-settling download and are covered by the cleanup check
-        // below.
-        assertTrue(completionLatch.await(25, TimeUnit.SECONDS),
-                "Download should complete or error within timeout");
-
-        assertTrue(downloadStarted.get(), "Download should have started");
-
-        // Since the chain denies loopback, we expect an error
-        if (errorMessage.get() != null) {
-            assertNotNull(errorMessage.get());
-            assertTrue(errorMessage.get().length() > 0);
-        }
-
-        // Verify cleanup
-        await().atMost(Duration.ofSeconds(5)).until(() -> handler.getActiveDownloadCount() == 0);
+        var progress = ArgumentCaptor.forClass(Float.class);
+        verify(listener, atLeastOnce()).onDownloadProgress(eq(download), progress.capture(),
+                anyLong(), anyLong(), anyFloat());
+        assertTrue(progress.getAllValues().stream().allMatch(value -> value >= 0 && value <= 100));
+        assertTrue(progress.getAllValues().stream().anyMatch(value -> value > 0 && value < 100),
+                "The real transfer should report intermediate progress");
+        var events = inOrder(listener);
+        events.verify(listener).onDownloadStart(download);
+        events.verify(listener).onDownloadComplete(download);
     }
 
     @Test
     @DisplayName("Should handle download with pause and resume")
-    @EnabledIfEnvironmentVariable(named = "PROXYCHAINS_AVAILABLE", matches = "true")
-    @Timeout(20)
-    void shouldHandleDownloadWithPauseAndResume() throws InterruptedException {
-        assertDoesNotThrow(() -> handler.initialize().join());
+    void shouldHandleDownloadWithPauseAndResume() throws Exception {
+        CountDownLatch responseReady = new CountDownLatch(1);
+        try (var heldProxy = new SocksHttpServer(false, TEST_FILE_CONTENT, responseReady)) {
+            Download download = newDownload("resumed.txt", heldProxy);
+            handler.startDownload(download).get(10, TimeUnit.SECONDS);
+            await().atMost(10, TimeUnit.SECONDS).until(() -> heldProxy.requestTargets.size() == 1);
 
-        // Large file to allow time for pause/resume
-        String largeContent = "A".repeat(10000);
-        mockWebServer.enqueue(new MockResponse()
-                .setBody(largeContent)
-                .setHeader("Content-Length", largeContent.length())
-                .setHeader("Content-Type", "text/plain"));
+            handler.pauseDownload(download).get(10, TimeUnit.SECONDS);
+            assertEquals(Download.Status.PAUSED, download.getStatus());
+            assertFalse(handler.isActive(download.getId()));
+            verify(listener).onDownloadPause(download);
 
-        URI downloadUri = URI.create(mockWebServer.url("/large-file.txt").toString());
+            handler.resumeDownload(download).get(10, TimeUnit.SECONDS);
+            await().atMost(10, TimeUnit.SECONDS).until(() -> heldProxy.requestTargets.size() == 2);
+            assertEquals(Download.Status.DOWNLOADING, download.getStatus());
+            assertTrue(handler.isActive(download.getId()));
+            responseReady.countDown();
 
-        CountDownLatch startLatch = new CountDownLatch(1);
-        CountDownLatch pauseLatch = new CountDownLatch(1);
-        CountDownLatch resumeLatch = new CountDownLatch(1);
-        CountDownLatch finalLatch = new CountDownLatch(1);
-
-        AtomicReference<Download> downloadRef = new AtomicReference<>();
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                downloadRef.set(download);
-                startLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                // Progress updates
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-                pauseLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-                resumeLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                finalLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadError(Download download, String errorMessage) {
-                // Expected due to invalid proxy
-                finalLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                finalLatch.countDown();
-            }
-        };
-
-        handler.addDownloadListener(testListener);
-
-        // Start download
-        Download download = handler.download(downloadUri, tempDir);
-
-        // Wait for download to start
-        assertTrue(startLatch.await(10, TimeUnit.SECONDS), "Download should start");
-
-        // Pause the download
-        handler.pauseDownload(download);
-        assertTrue(pauseLatch.await(5, TimeUnit.SECONDS), "Download should be paused");
-
-        // Resume the download
-        download.setStatus(Download.Status.PAUSED);
-        handler.resumeDownload(download);
-        assertTrue(resumeLatch.await(5, TimeUnit.SECONDS), "Download should be resumed");
-
-        // Wait for final completion/error
-        assertTrue(finalLatch.await(10, TimeUnit.SECONDS), "Download should complete or error");
+            assertCompleted(download, TEST_FILE_CONTENT);
+            var events = inOrder(listener);
+            events.verify(listener).onDownloadStart(download);
+            events.verify(listener).onDownloadPause(download);
+            events.verify(listener).onDownloadResume(download);
+            events.verify(listener).onDownloadComplete(download);
+        } finally {
+            responseReady.countDown();
+        }
     }
 
     @Test
     @DisplayName("Should handle download cancellation")
-    @Timeout(15)
-    void shouldHandleDownloadCancellation() throws InterruptedException {
+    void shouldHandleDownloadCancellation() throws Exception {
+        try (var heldProxy = new SocksHttpServer(false, TEST_FILE_CONTENT, new CountDownLatch(1))) {
+            Download download = newDownload("canceled.txt", heldProxy);
+            handler.startDownload(download).get(10, TimeUnit.SECONDS);
+            await().atMost(10, TimeUnit.SECONDS).until(() -> !heldProxy.requestTargets.isEmpty());
 
-        assertDoesNotThrow(() -> handler.initialize().join());
+            handler.cancelDownload(download, true).get(10, TimeUnit.SECONDS);
 
-        // Set up a slow response to allow time for cancellation
-        mockWebServer.enqueue(new MockResponse()
-                .setBody(TEST_FILE_CONTENT)
-                .setBodyDelay(5, TimeUnit.SECONDS)
-                .setHeader("Content-Length", TEST_FILE_SIZE));
-
-        URI downloadUri = URI.create("https://ash-speed.hetzner.com/100MB.bin");
-
-        CountDownLatch startLatch = new CountDownLatch(1);
-        CountDownLatch cancelLatch = new CountDownLatch(1);
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                startLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                // Progress updates
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                fail("Download should not complete - it should be canceled");
-            }
-
-            @Override
-            public void onDownloadError(Download download, String errorMessage) {
-                // May receive error instead of cancel due to invalid proxy
-                cancelLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                cancelLatch.countDown();
-            }
-        };
-
-        handler.addDownloadListener(testListener);
-
-        // Start download
-        Download download = handler.download(downloadUri, tempDir);
-
-        // Wait for download to start
-        assertTrue(startLatch.await(20, TimeUnit.SECONDS), "Download should start");
-
-        // Cancel the download
-        handler.cancelDownload(download, true);
-
-        // Wait for cancellation
-        assertTrue(cancelLatch.await(10, TimeUnit.SECONDS), "Download should be canceled or error");
-
-        // Verify cleanup
-        assertFalse(handler.isActive(download.getId()));
-        assertEquals(0, handler.getActiveDownloadCount());
+            assertEquals(Download.Status.CANCELED, download.getStatus());
+            verify(listener).onDownloadStart(download);
+            verify(listener).onDownloadCanceled(download);
+            verify(listener, never()).onDownloadComplete(download);
+            verify(listener, never()).onDownloadError(eq(download), anyString());
+            assertFalse(handler.isActive(download.getId()));
+            assertEquals(0, handler.getActiveDownloadCount());
+            assertFalse(Files.exists(tempDir.resolve(download.getName())));
+        }
     }
 
     @Test
     @DisplayName("Should handle multiple concurrent downloads")
-    @Timeout(30)
-    void shouldHandleMultipleConcurrentDownloads() throws InterruptedException {
+    void shouldHandleMultipleConcurrentDownloads() throws Exception {
+        Map<String, String> contents = Map.of(
+                "/file0.txt", "Content for file 0\n".repeat(50),
+                "/file1.txt", "Content for file 1\n".repeat(50),
+                "/file2.txt", "Content for file 2\n".repeat(50));
+        Set<String> requests = ConcurrentHashMap.newKeySet();
+        CountDownLatch allRequested = new CountDownLatch(contents.size());
+        CountDownLatch responseReady = new CountDownLatch(1);
+        mockWebServer.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                String body = contents.get(request.getPath());
+                if (body == null) {
+                    return new MockResponse().setResponseCode(404);
+                }
+                if (requests.add(request.getPath())) {
+                    allRequested.countDown();
+                }
+                responseReady.await();
+                return new MockResponse().setBody(body);
+            }
+        });
+        var downloads = new ArrayList<Download>();
+        try {
+            for (String path : contents.keySet()) {
+                Download download = newDownload(path.substring(1), proxy);
+                downloads.add(download);
+                handler.startDownload(download).get(10, TimeUnit.SECONDS);
+            }
+            assertTrue(allRequested.await(10, TimeUnit.SECONDS), "All distinct requests must reach the server");
+            assertEquals(contents.size(), handler.getActiveDownloadCount());
+            for (Download download : downloads) {
+                assertEquals(Download.Status.DOWNLOADING, download.getStatus());
+                verify(listener).onDownloadStart(download);
+            }
+            responseReady.countDown();
 
-        assertDoesNotThrow(() -> handler.initialize().join());
-
-        int numberOfDownloads = 3;
-
-        // Enqueue responses for all downloads
-        for (int i = 0; i < numberOfDownloads; i++) {
-            String content = "Content for file " + i + "\n".repeat(50);
-            mockWebServer.enqueue(new MockResponse()
-                    .setBody(content)
-                    .setHeader("Content-Length", content.length())
-                    .setHeader("Content-Type", "text/plain"));
+            for (Download download : downloads) {
+                assertCompleted(download, contents.get(download.getUri().getPath()));
+            }
+            assertEquals(contents.keySet(), Set.copyOf(proxy.requestTargets));
+            assertEquals(Set.of(TEST_HOST), Set.copyOf(proxy.hosts));
+            assertTrue(proxy.failures.isEmpty(), proxy.failures.toString());
+        } finally {
+            responseReady.countDown();
         }
-
-        CountDownLatch allStartedLatch = new CountDownLatch(numberOfDownloads);
-        CountDownLatch allCompletedLatch = new CountDownLatch(numberOfDownloads);
-        AtomicInteger startedCount = new AtomicInteger(0);
-        AtomicInteger completedCount = new AtomicInteger(0);
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                startedCount.incrementAndGet();
-                allStartedLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                // Progress tracking
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                completedCount.incrementAndGet();
-                allCompletedLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadError(Download download, String errorMessage) {
-                // Count errors as completion for test purposes
-                completedCount.incrementAndGet();
-                allCompletedLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                completedCount.incrementAndGet();
-                allCompletedLatch.countDown();
-            }
-        };
-
-        handler.addDownloadListener(testListener);
-
-        // Start multiple downloads
-        for (int i = 0; i < numberOfDownloads; i++) {
-            URI downloadUri = URI.create(mockWebServer.url("/file" + i + ".txt").toString());
-
-            Map<String, String> options = new HashMap<>();
-            options.put("aria2.max-connection-per-server", "1");
-            options.put("download.id", String.valueOf(i));
-
-            Download download = handler.download(downloadUri, tempDir, options);
-            assertNotNull(download);
-        }
-
-        // Verify all downloads started
-        assertTrue(allStartedLatch.await(10, TimeUnit.SECONDS),
-                "All downloads should start within timeout");
-        assertEquals(numberOfDownloads, startedCount.get());
-        assertEquals(numberOfDownloads, handler.getActiveDownloadCount());
-
-        // Wait for all downloads to complete (or error)
-        assertTrue(allCompletedLatch.await(20, TimeUnit.SECONDS),
-                "All downloads should complete within timeout");
-        assertEquals(numberOfDownloads, completedCount.get());
-
-        // Verify cleanup
-        await().atMost(Duration.ofSeconds(5))
-                .until(() -> handler.getActiveDownloadCount() == 0);
     }
 
     @ParameterizedTest
     @DisplayName("Should handle different HTTP response codes")
-    @ValueSource(ints = { 404, 500, 503, 403 })
-    @Timeout(15)
-    void shouldHandleDifferentHttpResponseCodes(int responseCode) throws InterruptedException {
-        mockWebServer.enqueue(new MockResponse()
-                .setResponseCode(responseCode)
-                .setBody("Error response"));
+    @ValueSource(ints = {404, 500, 503, 403})
+    void shouldHandleDifferentHttpResponseCodes(int responseCode) throws Exception {
+        mockWebServer.enqueue(new MockResponse().setResponseCode(responseCode).setBody("Error response"));
+        Download download = newDownload("error-file.txt", proxy);
 
-        URI downloadUri = URI.create(mockWebServer.url("/error-file.txt").toString());
+        handler.startDownload(download).get(10, TimeUnit.SECONDS);
 
-        CountDownLatch errorLatch = new CountDownLatch(1);
-        AtomicReference<String> errorMessage = new AtomicReference<>();
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                // Expected
-            }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                // Not expected for error responses
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                fail("Download should not complete with error response code: " + responseCode);
-            }
-
-            @Override
-            public void onDownloadError(Download download, String error) {
-                errorMessage.set(error);
-                errorLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                fail("Download should error, not be canceled");
-            }
-        };
-
-        handler.addDownloadListener(testListener);
-
-        // Start download
-        Download download = handler.download(downloadUri, tempDir);
-
-        // Should receive error callback
-        assertTrue(errorLatch.await(10, TimeUnit.SECONDS),
-                "Should receive error for response code: " + responseCode);
-
-        String error = errorMessage.get();
-        assertNotNull(error);
-        assertTrue(error.length() > 0);
+        String error = assertFailed(download);
+        String expectedDiagnostic = responseCode == 404 ? "Resource not found" : Integer.toString(responseCode);
+        assertTrue(error.contains(expectedDiagnostic), error);
+        assertRoutedRequest("/error-file.txt");
     }
 
     @Test
     @DisplayName("Should create and use custom proxy configuration")
-    @Timeout(20)
-    void shouldCreateAndUseCustomProxyConfiguration() throws IOException, InterruptedException {
-        // Create custom configuration with multiple proxies
-        ProxychainsConfig customConfig = new ProxychainsConfig()
-                .setChainType(ProxychainsConfig.ChainType.STRICT)
-                .setProxyDns(true)
-                .setTcpReadTimeout(5000)
-                .setTcpConnectTimeout(3000)
-                .addProxy(ProxychainsConfig.ProxyType.SOCKS5, "127.0.0.1", 9050)
-                .addProxy(ProxychainsConfig.ProxyType.HTTP, "proxy.example.com", 8080, "user", "pass");
+    void shouldCreateAndUseCustomProxyConfiguration() throws Exception {
+        try (var authenticatedProxy = new SocksHttpServer(true, TEST_FILE_CONTENT)) {
+            ProxychainsConfig customConfig = new ProxychainsConfig()
+                    .setChainType(ProxychainsConfig.ChainType.STRICT)
+                    .setProxyDns(true)
+                    .setTcpReadTimeout(5000)
+                    .setTcpConnectTimeout(3000)
+                    .addProxy(ProxychainsConfig.ProxyType.SOCKS5, "127.0.0.1",
+                            authenticatedProxy.port(), "user", "pass");
+            Path configFile = customConfig.createTempConfig();
+            String configContent = Files.readString(configFile);
+            assertTrue(configContent.contains("strict_chain"));
+            assertTrue(configContent.contains("proxy_dns"));
+            assertTrue(configContent.contains("tcp_read_time_out 5000"));
+            assertTrue(configContent.contains("tcp_connect_time_out 3000"));
+            assertTrue(configContent.contains("socks5 127.0.0.1 " + authenticatedProxy.port() + " user pass"));
 
-        // Create temporary config file
-        Path configFile = customConfig.createTempConfig();
-        assertTrue(Files.exists(configFile));
+            ProxychainsClient client = new ProxychainsClient("proxychains4", configFile.toString());
+            try {
+                Download download = newDownload("config-test.txt", authenticatedProxy);
+                // Exercise the supplied config file rather than generating one from the download.
+                download.setUseProxy(false);
+                client.startDownload(download, listener, Map.of()).get(10, TimeUnit.SECONDS);
 
-        // Verify config content
-        String configContent = Files.readString(configFile);
-        assertTrue(configContent.contains("strict_chain"));
-        assertTrue(configContent.contains("proxy_dns"));
-        assertTrue(configContent.contains("tcp_read_time_out 5000"));
-        assertTrue(configContent.contains("tcp_connect_time_out 3000"));
-        assertTrue(configContent.contains("socks5 127.0.0.1 9050"));
-        assertTrue(configContent.contains("http proxy.example.com 8080 user pass"));
-
-        // Set up mock response
-        mockWebServer.enqueue(new MockResponse()
-                .setBody(TEST_FILE_CONTENT)
-                .setHeader("Content-Length", TEST_FILE_SIZE));
-
-        URI downloadUri = URI.create(mockWebServer.url("/config-test.txt").toString());
-
-        CountDownLatch completionLatch = new CountDownLatch(1);
-        AtomicReference<String> errorMessage = new AtomicReference<>();
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                assertEquals(Download.Type.PROXYCHAINS, download.getType());
+                assertCompleted(download, TEST_FILE_CONTENT);
+                assertEquals(Set.of(TEST_HOST), Set.copyOf(authenticatedProxy.hosts));
+                assertEquals(Set.of("user:pass"), Set.copyOf(authenticatedProxy.credentials));
+                assertEquals(Set.of("/config-test.txt"), Set.copyOf(authenticatedProxy.requestTargets));
+                assertTrue(authenticatedProxy.failures.isEmpty(), authenticatedProxy.failures.toString());
+            } finally {
+                client.shutdown();
+                Files.deleteIfExists(configFile);
             }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                // Progress updates
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                completionLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadError(Download download, String error) {
-                errorMessage.set(error);
-                completionLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                completionLatch.countDown();
-            }
-        };
-
-        // Create handler with custom client
-        ExecutorService customExecutor = Executors.newCachedThreadPool();
-        ProxychainsDownloadHandler customHandler = new ProxychainsDownloadHandler(mockGlobalSettings,
-                mockSettingsFactory, customExecutor, ApplicationContext.getToolManagerFactory());
-        customHandler.addDownloadListener(testListener);
-
-        try {
-            // Start download with custom configuration
-            Download download = customHandler.download(downloadUri, tempDir);
-
-            // Wait for completion (will likely error due to invalid proxies)
-            assertTrue(completionLatch.await(15, TimeUnit.SECONDS),
-                    "Download should complete or error");
-
-            // We expect an error due to invalid proxy configuration
-            if (errorMessage.get() != null) {
-                assertNotNull(errorMessage.get());
-                assertTrue(errorMessage.get().length() > 0);
-            }
-        } finally {
-            customHandler.shutdown().join();
-            customExecutor.shutdownNow();
         }
     }
 
     @Test
     @DisplayName("Should handle network timeouts gracefully")
-    @Timeout(25)
-    void shouldHandleNetworkTimeoutsGracefully() throws InterruptedException {
-        // Set up server to never respond (simulates network timeout)
-        mockWebServer.enqueue(new MockResponse()
-                .setBody(TEST_FILE_CONTENT)
-                .setBodyDelay(30, TimeUnit.SECONDS)); // Longer than our timeout
+    void shouldHandleNetworkTimeoutsGracefully() throws Exception {
+        mockWebServer.enqueue(new MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE));
+        Download download = newDownload("timeout-test.txt", proxy);
+        handler.setDownloadOptions(download.getId(), Map.of("aria2.timeout", "2"));
 
-        URI downloadUri = URI.create(mockWebServer.url("/timeout-test.txt").toString());
+        handler.startDownload(download).get(10, TimeUnit.SECONDS);
 
-        CountDownLatch errorLatch = new CountDownLatch(1);
-        AtomicReference<String> errorMessage = new AtomicReference<>();
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                // Expected
-            }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                // May or may not happen
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                fail("Download should timeout, not complete");
-            }
-
-            @Override
-            public void onDownloadError(Download download, String error) {
-                errorMessage.set(error);
-                errorLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                errorLatch.countDown();
-            }
-        };
-
-        handler.addDownloadListener(testListener);
-
-        // Configure short timeout
-        Map<String, String> options = new HashMap<>();
-        options.put("aria2.timeout", "5"); // 5 second timeout
-
-        // Start download
-        Download download = handler.download(downloadUri, tempDir, options);
-
-        // Should get timeout error
-        assertTrue(errorLatch.await(20, TimeUnit.SECONDS),
-                "Should receive timeout error");
-
-        // Verify error contains timeout information
-        String error = errorMessage.get();
-        if (error != null) {
-            assertTrue(error.length() > 0);
-        }
+        String error = assertFailed(download);
+        assertTrue(error.contains("errorCode=2 Timeout"), error);
+        assertRoutedRequest("/timeout-test.txt");
     }
 
     @Test
     @DisplayName("Should validate integration with ProxychainsSettings")
-    @Timeout(15)
-    void shouldValidateIntegrationWithProxychainsSettings() throws InterruptedException {
+    void shouldValidateIntegrationWithProxychainsSettings() throws Exception {
         ProxychainsSettings settings = new ProxychainsSettings()
                 .setProgram("aria2c")
                 .setQuiet(true)
                 .setForceV4(true)
-                .setRandomChain(0) // Disable random chain
+                .setRandomChain(0)
                 .setTorMode(false)
                 .setStrictChain(false);
-
-        mockWebServer.enqueue(new MockResponse()
-                .setBody("Settings test content")
-                .setHeader("Content-Length", "21"));
-
-        URI downloadUri = URI.create(mockWebServer.url("/settings-test.txt").toString());
-
-        CountDownLatch completionLatch = new CountDownLatch(1);
-
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                // Verify settings integration
-                assertEquals(Download.Type.PROXYCHAINS, download.getType());
-            }
-
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-            }
-
-            @Override
-            public void onDownloadPause(Download download) {
-            }
-
-            @Override
-            public void onDownloadResume(Download download) {
-            }
-
-            @Override
-            public void onDownloadComplete(Download download) {
-                completionLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadError(Download download, String errorMessage) {
-                completionLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                completionLatch.countDown();
-            }
-        };
-
-        handler.addDownloadListener(testListener);
-
-        // Convert settings to options map
         Map<String, String> options = settings.toMap();
-
-        // Verify settings were converted correctly
         assertEquals("aria2c", options.get("proxychains.program"));
         assertEquals("true", options.get("proxychains.quiet"));
         assertEquals("true", options.get("proxychains.4"));
-        assertFalse(options.containsKey("proxychains.random-chain")); // Should not contain 0 value
+        assertFalse(options.containsKey("proxychains.random-chain"));
         assertFalse(options.containsKey("proxychains.tor"));
         assertFalse(options.containsKey("proxychains.strict"));
 
-        // Start download with settings
-        Download download = handler.download(downloadUri, tempDir, options);
+        mockWebServer.enqueue(new MockResponse().setBody("Settings test content"));
+        Download download = newDownload("settings-test.txt", proxy);
+        download.setSettings(settings);
+        download.setProxyAddress("socks5h://127.0.0.1:" + proxy.port());
+        download.setUseProxy(true);
+        download.setConnections(1);
+        handler.setDownloadOptions(download.getId(), options);
+        handler.startDownload(download).get(10, TimeUnit.SECONDS);
 
-        // Wait for completion
-        assertTrue(completionLatch.await(10, TimeUnit.SECONDS),
-                "Download should complete or error");
+        assertCompleted(download, "Settings test content");
+        assertRoutedRequest("/settings-test.txt");
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = "ENABLE_NETWORK_TESTS", matches = "true")
-    @DisplayName("Should work with real network endpoints")
-    @Timeout(60)
-    void shouldWorkWithRealNetworkEndpoints() throws InterruptedException {
-        assertDoesNotThrow(() -> handler.initialize().join());
+    @DisplayName("Should download binary content through a local network endpoint")
+    void shouldWorkWithLocalNetworkEndpoint() throws Exception {
+        byte[] content = new byte[1024];
+        for (int i = 0; i < content.length; i++) {
+            content[i] = (byte) i;
+        }
+        mockWebServer.enqueue(new MockResponse().setBody(new Buffer().write(content)));
+        Download download = newDownload("binary-file.bin", proxy);
 
-        // This test uses real network endpoints - only enable when specifically
-        // requested
-        URI testUri = URI.create("https://httpbin.org/bytes/1024");
+        handler.startDownload(download).get(10, TimeUnit.SECONDS);
 
-        CountDownLatch completionLatch = new CountDownLatch(1);
-        AtomicBoolean downloadStarted = new AtomicBoolean(false);
-        AtomicReference<String> result = new AtomicReference<>();
+        awaitTerminal(download);
+        assertEquals(Download.Status.COMPLETED, download.getStatus(), download.getErrorMessage());
+        verify(listener, timeout(1000)).onDownloadComplete(download);
+        verify(listener).onDownloadStart(download);
+        verify(listener, never()).onDownloadError(eq(download), anyString());
+        assertArrayEquals(content, Files.readAllBytes(tempDir.resolve(download.getName())));
+        assertRoutedRequest("/binary-file.bin");
+        await().atMost(5, TimeUnit.SECONDS).until(() -> handler.getActiveDownloadCount() == 0);
+    }
 
-        DownloadListener testListener = new DownloadListener() {
-            @Override
-            public void onDownloadStart(Download download) {
-                downloadStarted.set(true);
-            }
+    private Download newDownload(String fileName, SocksHttpServer route) {
+        Download download = new Download(URI.create("http://" + TEST_HOST + "/" + fileName));
+        download.setDestination(tempDir);
+        download.setName(fileName);
+        download.setType(Download.Type.PROXYCHAINS);
+        download.setProxyAddress("socks5h://127.0.0.1:" + route.port());
+        download.setUseProxy(true);
+        download.setConnections(1);
+        download.getSettings().setMaxRetries(1);
+        download.getSettings().setRetryDelaySeconds(1);
+        return download;
+    }
 
-            @Override
-            public void onDownloadProgress(Download download, float progress, long downloadedBytes, long totalBytes,
-                    float speed) {
-                // Real progress updates
-            }
+    private void awaitTerminal(Download download) {
+        await().atMost(10, TimeUnit.SECONDS).until(() ->
+                download.getStatus() == Download.Status.COMPLETED
+                        || download.getStatus() == Download.Status.ERROR
+                        || download.getStatus() == Download.Status.CANCELED);
+    }
 
-            @Override
-            public void onDownloadPause(Download download) {
-            }
+    private void assertCompleted(Download download, String content) throws IOException {
+        awaitTerminal(download);
+        assertEquals(Download.Status.COMPLETED, download.getStatus(), download.getErrorMessage());
+        verify(listener, timeout(1000)).onDownloadComplete(download);
+        verify(listener, never()).onDownloadError(eq(download), anyString());
+        verify(listener, never()).onDownloadCanceled(download);
+        assertEquals(content, Files.readString(tempDir.resolve(download.getName())));
+        await().atMost(5, TimeUnit.SECONDS).until(() -> !handler.isActive(download.getId()));
+    }
 
-            @Override
-            public void onDownloadResume(Download download) {
-            }
+    private String assertFailed(Download download) {
+        awaitTerminal(download);
+        assertEquals(Download.Status.ERROR, download.getStatus());
+        var error = ArgumentCaptor.forClass(String.class);
+        verify(listener, timeout(1000)).onDownloadError(eq(download), error.capture());
+        assertNotNull(error.getValue());
+        assertFalse(error.getValue().isBlank());
+        verify(listener, never()).onDownloadComplete(download);
+        verify(listener, never()).onDownloadCanceled(download);
+        await().atMost(5, TimeUnit.SECONDS).until(() -> handler.getActiveDownloadCount() == 0);
+        return error.getValue();
+    }
 
-            @Override
-            public void onDownloadComplete(Download download) {
-                result.set("completed");
-                completionLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadError(Download download, String errorMessage) {
-                result.set("error: " + errorMessage);
-                completionLatch.countDown();
-            }
-
-            @Override
-            public void onDownloadCanceled(Download download) {
-                result.set("canceled");
-                completionLatch.countDown();
-            }
-        };
-
-        handler.addDownloadListener(testListener);
-
-        // Configure reasonable options for real network
-        Map<String, String> options = new HashMap<>();
-        options.put("aria2.max-connection-per-server", "2");
-        options.put("aria2.split", "2");
-        options.put("aria2.timeout", "30");
-
-        // Start real download
-        Download download = handler.download(testUri, tempDir, options);
-
-        // Wait for completion
-        assertTrue(completionLatch.await(45, TimeUnit.SECONDS),
-                "Real network download should complete within timeout");
-
-        assertTrue(downloadStarted.get(), "Download should have started");
-        assertNotNull(result.get());
-
-        // Log result for debugging
-        LOGGER.info("Real network test result: " + result.get());
+    private void assertRoutedRequest(String path) throws InterruptedException {
+        RecordedRequest request = mockWebServer.takeRequest(5, TimeUnit.SECONDS);
+        assertNotNull(request, "The request should reach the local HTTP server through SOCKS");
+        assertEquals(path, request.getPath());
+        assertTrue(proxy.hosts.contains(TEST_HOST), proxy.hosts.toString());
+        assertTrue(proxy.requestTargets.contains(path), proxy.requestTargets.toString());
     }
 }
