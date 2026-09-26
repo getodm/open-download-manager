@@ -46,7 +46,9 @@ Optional but recommended: proxychains, Tor, and FFmpeg.
 
 </details>
 
-Packages are produced for Debian/Ubuntu (`.deb`), Fedora/RHEL (`.rpm`), and Arch (`pkg.tar.zst`). Each package bundles a trimmed Java 25 runtime; GTK4 and the download tools above are still required from the host system.
+Packages are produced for Debian/Ubuntu (`.deb`), Fedora/RHEL (`.rpm`), and Arch (`pkg.tar.zst`). 
+Download [Here](https://github.com/getodm/open-download-manager/releases). 
+Each package bundles a trimmed Java 25 runtime; GTK4 and the download tools above are still required from the host system.
 
 ```sh
 # Debian/Ubuntu
@@ -57,6 +59,9 @@ sudo rpm -i open-download-manager-*.rpm
 
 # Arch
 sudo pacman -U open-download-manager-*.pkg.tar.zst
+
+#AppImage
+chmod +x && ./Open_Download_Manager-0.3.1-x86_64.AppImage
 ```
 
 

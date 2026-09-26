@@ -8,11 +8,11 @@ permissions:
     contents: read
 
 jobs:
-    # validation:
-    #     uses: ./.github/workflows/test-ci.yml
+    validation:
+        uses: ./.github/workflows/test-ci.yml
 
     release:
-        # needs: validation
+        needs: validation
         runs-on: ubuntu-latest
         permissions:
             contents: write
