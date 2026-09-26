@@ -27,8 +27,10 @@ RUN apt-get update && apt-get install -y \
     httrack \
     proxychains4 \
     tor \
-    yt-dlp \
     subliminal \
+    # ffmpeg was previously pulled in transitively (apt yt-dlp Recommends);
+    # media postprocessing tests need it explicitly
+    ffmpeg \
     # X11 for GUI testing
     xvfb \
     x11-utils \
@@ -55,6 +57,14 @@ RUN localedef -i en_US -f UTF-8 en_US.UTF-8 && \
     localedef -i fr_BE -f UTF-8 fr_BE.UTF-8 && \
     localedef -i fr_CA -f UTF-8 fr_CA.UTF-8 && \
     localedef -i de_DE -f UTF-8 de_DE.UTF-8
+
+# yt-dlp: the noble apt build (2024.04.09) predates --plugin-dirs (added in
+# 2024.10.22), which the media output-name postprocessor plugin requires
+# (MediaOutputNames). Install the official self-contained binary instead of
+# the distro package.
+RUN curl -fSL --retry 3 -o /usr/local/bin/yt-dlp \
+        https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+    && chmod 755 /usr/local/bin/yt-dlp
 
 # Install the matching Chromium build for headless media discovery. Keep the
 # browser available to the non-root development user; probes never download it.
