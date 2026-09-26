@@ -47,7 +47,6 @@ log "Assembling application tree under $STAGE..."
 rm -rf "$STAGE"
 mkdir -p "$DIST" "$APP" "$RUNTIME" "$STAGE/usr/bin" \
     "$STAGE/usr/share/applications" \
-    "$STAGE/usr/share/metainfo" \
     "$STAGE/usr/share/doc/open-download-manager" \
     "$STAGE/usr/share/licenses/open-download-manager" \
     "$STAGE/usr/share/icons/hicolor"
@@ -85,9 +84,6 @@ EOF
 chmod 755 "$STAGE/usr/bin/open-download-manager"
 
 cp packaging/resources/open-download-manager.desktop "$STAGE/usr/share/applications/org.odm.desktop"
-sed -e "s/__VERSION__/${VERSION}/g" -e "s/__DATE__/$(date +%F)/g" \
-    packaging/resources/org.odm.metainfo.xml \
-    > "$STAGE/usr/share/metainfo/org.odm.metainfo.xml"
 cp -a odm-gtk4/src/main/resources/icons/hicolor/. "$STAGE/usr/share/icons/hicolor/"
 
 log "Stage complete:"
@@ -204,128 +200,10 @@ EOF
     log "Built dist/open-download-manager-${VERSION}-1-x86_64.pkg.tar.zst"
 }
 
-# ---- AppImage ----
-# Core runtime libraries stay on the host; everything else travels inside the
-# image. Bundling libc/libstdc++ would clash with host binaries the app spawns.
-APPIMAGE_LIB_EXCLUDE='^(linux-vdso.*|ld-linux.*|libc\.so.*|libm\.so.*|libmvec.*|libdl\.so.*|librt\.so.*|libpthread\.so.*|libresolv\.so.*|libnsl\.so.*|libnss_.*|libutil\.so.*|libatomic.*|libstdc\+\+.*|libgcc_s.*|libselinux.*|libmount.*|libblkid.*)$'
-
-# BFS over ldd output: copy the seed sonames ($1, resolved via ldconfig) and
-# the library closure of binary $2 into $3, skipping core host libraries.
-appimage_copy_closure() {
-    local -n seeds_ref=$1
-    local binary="$2"
-    local libdir="$3"
-    local queue=("${seeds_ref[@]}") item path base dep dbase
-    if [[ -n "$binary" ]]; then
-        while read -r dep; do
-            queue+=("$dep")
-        done < <(ldd "$binary" 2>/dev/null | awk '/=> \// {print $3}')
-    fi
-    while ((${#queue[@]})); do
-        item="${queue[0]}"
-        queue=("${queue[@]:1}")
-        case "$item" in
-            /*) path="$item" ;;
-            *)
-                [[ "$item" =~ $APPIMAGE_LIB_EXCLUDE ]] && continue
-                path="$(ldconfig -p | awk -v l="$item" '$1==l {print $NF; exit}')"
-                ;;
-        esac
-        [[ -n "$path" && -f "$path" ]] || continue
-        base="$(basename "$path")"
-        [[ "$base" =~ $APPIMAGE_LIB_EXCLUDE ]] && continue
-        case "$path" in
-            /usr/lib/*|/lib/*) ;;
-            *) continue ;;
-        esac
-        [[ -e "$libdir/$base" ]] && continue
-        cp -L "$path" "$libdir/$base"
-        while read -r dep; do
-            dbase="$(basename "$dep")"
-            [[ "$dbase" =~ $APPIMAGE_LIB_EXCLUDE ]] && continue
-            [[ -e "$libdir/$dbase" ]] || queue+=("$dep")
-        done < <(ldd "$path" 2>/dev/null | awk '/=> \// {print $3}')
-    done
-}
-
-# Copies the stage tree plus the host's GTK4 stack (with the transitive non-core
-# library closure) into an AppDir so the image runs on systems without GTK4.
-# aria2c is bundled because ODM requires it at startup; yt-dlp/HTTrack are
-# resolved from the host PATH at runtime and degrade gracefully when absent.
-build_appimage() {
-    log "Building AppImage..."
-    local appdir="$ROOT/packaging/appimage-build/AppDir"
-    local libdir="$appdir/usr/lib/x86_64-linux-gnu"
-    rm -rf "$ROOT/packaging/appimage-build"
-    mkdir -p "$appdir"
-    cp -a "$STAGE/." "$appdir/"
-    rm -f "$appdir/usr/bin/open-download-manager"
-
-    local tool="$ROOT/packaging/appimage/appimagetool-x86_64.AppImage"
-    if [[ ! -x "$tool" ]]; then
-        log "Downloading appimagetool (cached under packaging/appimage/)..."
-        curl -fSL --retry 3 -o "$tool" \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-        chmod 755 "$tool"
-    fi
-
-    mkdir -p "$libdir"
-    local gtk_seeds=(
-        libgtk-4.so.1 libglib-2.0.so.0 libgobject-2.0.so.0 libgio-2.0.so.0
-        libgmodule-2.0.so.0 libgdk_pixbuf-2.0.so.0 libpango-1.0.so.0
-        libpangocairo-1.0.so.0 libpangoft2-1.0.so.0 libcairo.so.2
-        libcairo-gobject.so.2 libharfbuzz.so.0 libgraphene-1.0.so.0
-        libepoxy.so.0 libfontconfig.so.1 libfreetype.so.6 libpng16.so.16
-    )
-    appimage_copy_closure gtk_seeds "" "$libdir"
-    # aria2c is required for ODM startup; ship it with its library closure.
-    local aria2c_path=""
-    if command -v aria2c >/dev/null; then
-        aria2c_path="$(command -v aria2c)"
-        cp -L "$aria2c_path" "$appdir/usr/bin/aria2c"
-        local no_seeds=()
-        appimage_copy_closure no_seeds "$aria2c_path" "$libdir"
-    else
-        log "WARNING: aria2c not found on the build host; AppImage requires aria2 at runtime"
-    fi
-    cp -a /usr/lib/x86_64-linux-gnu/girepository-1.0 "$libdir/"
-    cp -a /usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0 "$libdir/"
-    # Pixbuf loaders are dlopened, so their deps are not in the seeds' closure.
-    local loader no_deps=()
-    for loader in "$libdir"/gdk-pixbuf-2.0/*/loaders/*.so; do
-        [[ -e "$loader" ]] || continue
-        appimage_copy_closure no_deps "$loader" "$libdir"
-    done
-
-    cp "$ROOT/packaging/appimage/AppRun" "$appdir/AppRun"
-    chmod 755 "$appdir/AppRun"
-    # AppImage convention: desktop file + icon at the AppDir root.
-    sed -e 's|^Exec=.*|Exec=AppRun %U|' \
-        "$STAGE/usr/share/applications/org.odm.desktop" \
-        > "$appdir/open-download-manager.desktop"
-    chmod 644 "$appdir/open-download-manager.desktop"
-    cp "$STAGE/usr/share/icons/hicolor/256x256/apps/open-download-manager.png" \
-        "$appdir/open-download-manager.png"
-    ln -sf open-download-manager.png "$appdir/.DirIcon"
-
-    local out="$DIST/Open_Download_Manager-${VERSION}-x86_64.AppImage"
-    rm -f "$out"
-    local extract=()
-    if [[ ! -c /dev/fuse ]] || [[ ! -w /dev/fuse ]]; then
-        extract=(--appimage-extract-and-run)
-    fi
-    (cd "$ROOT/packaging/appimage-build" && ARCH=x86_64 "$tool" \
-        "${extract[@]}" -n "$appdir" "$out")
-    rm -rf "$ROOT/packaging/appimage-build"
-    log "Built dist/Open_Download_Manager-${VERSION}-x86_64.AppImage"
-}
-
 build_deb
 build_rpm
 build_arch
-build_appimage
 
 log "Artifacts:"
-ls -la "$DIST/"*.deb "$DIST/"*.rpm "$DIST/"*.pkg.tar.zst \
-    "$DIST/"*.AppImage 2>/dev/null || true
+ls -la "$DIST/"*.deb "$DIST/"*.rpm "$DIST/"*.pkg.tar.zst 2>/dev/null || true
 log "Done."

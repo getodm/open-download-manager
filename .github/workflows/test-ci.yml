@@ -42,16 +42,14 @@ jobs:
             - name: Build Docker image
               run: ./docker-build.sh build
 
-            # Hermetic unit suite (integration/E2E suites are excluded from
-            # the default run by core/pom.xml). Tests require aria2, yt-dlp,
+            # Regular core and GTK suite (integration/E2E tests are excluded
+            # by the parent POM). Tests require aria2, yt-dlp,
             # httrack, tor and Xvfb — all provided by the project Docker
             # image (see AGENTS.md).
-            - name: Run unit tests
+            - name: Run regular core and GTK tests
               run: ./docker-build.sh test
 
-            # Full suite: adds the integration and E2E tests excluded above
-            # by running the Maven `integration` profile inside the same
-            # image; these launch real aria2c, yt-dlp, httrack, tor and
-            # proxychains processes and may reach the network.
-            - name: Run integration tests
+            # Only the integration/E2E tests excluded above. The parent
+            # profile applies to every module, so GTK tests are not repeated.
+            - name: Run integration and E2E tests
               run: ./docker-build.sh test-integration

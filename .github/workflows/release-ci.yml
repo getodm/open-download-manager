@@ -60,7 +60,7 @@ jobs:
             - name: Build Docker image
               run: ./docker-build.sh build
 
-            - name: Build packages (.deb/.rpm/.pkg.tar.zst/.AppImage)
+            - name: Build packages (.deb/.rpm/.pkg.tar.zst)
               env:
                   VERSION: ${{ steps.version.outputs.version }}
               run: ./docker-build.sh package "$VERSION"
@@ -75,13 +75,6 @@ jobs:
                   VERSION: ${{ steps.version.outputs.version }}
               run: docker run --rm -e VERSION -v "$(pwd)/packaging/dist:/pkgs:ro" ubuntu:24.04 bash -c 'apt-get update -qq && apt-get install -y -qq "/pkgs/open-download-manager_${VERSION}_amd64.deb" && test -x /usr/bin/open-download-manager'
 
-            - name: Install test (AppImage on clean Ubuntu)
-              env:
-                  VERSION: ${{ steps.version.outputs.version }}
-              # /pkgs is a read-only mount; copy into the container before
-              # chmod, as a user would after downloading the artifact.
-              run: docker run --rm -e VERSION -v "$(pwd)/packaging/dist:/pkgs:ro" ubuntu:24.04 bash -c 'cp "/pkgs/Open_Download_Manager-${VERSION}-x86_64.AppImage" /tmp/odm.AppImage && chmod +x /tmp/odm.AppImage && /tmp/odm.AppImage --appimage-extract-and-run --version'
-
             - name: Create release and attach packages
               uses: softprops/action-gh-release@v2
               with:
@@ -93,9 +86,7 @@ jobs:
                       - `open-download-manager_${{ steps.version.outputs.version }}_amd64.deb` — Debian/Ubuntu
                       - `open-download-manager-${{ steps.version.outputs.version }}-1.x86_64.rpm` — Fedora/RHEL
                       - `open-download-manager-${{ steps.version.outputs.version }}-1-x86_64.pkg.tar.zst` — Arch Linux
-                      - `Open_Download_Manager-${{ steps.version.outputs.version }}-x86_64.AppImage` — portable, bundled GTK4 + aria2 (host yt-dlp/HTTrack used when present)
                   files: |
                       packaging/dist/open-download-manager_${{ steps.version.outputs.version }}_amd64.deb
                       packaging/dist/open-download-manager-${{ steps.version.outputs.version }}-1.x86_64.rpm
                       packaging/dist/open-download-manager-${{ steps.version.outputs.version }}-1-x86_64.pkg.tar.zst
-                      packaging/dist/Open_Download_Manager-${{ steps.version.outputs.version }}-x86_64.AppImage

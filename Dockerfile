@@ -1,9 +1,4 @@
-# Pin to the Ubuntu 24.04 (noble) base: the floating 25-jdk tag moved to a
-# newer Ubuntu whose glibc the AppImage cannot run on (bundled GTK libs then
-# require GLIBC_2.4x symbols, breaking every older host, and the mixed-loader
-# crash killed even host tools under LD_LIBRARY_PATH). noble's glibc 2.39 is
-# the floor the release CI install tests target.
-FROM eclipse-temurin:25-jdk-noble
+FROM eclipse-temurin:25-jdk
 
 # Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -27,10 +22,8 @@ RUN apt-get update && apt-get install -y \
     httrack \
     proxychains4 \
     tor \
+    yt-dlp \
     subliminal \
-    # ffmpeg was previously pulled in transitively (apt yt-dlp Recommends);
-    # media postprocessing tests need it explicitly
-    ffmpeg \
     # X11 for GUI testing
     xvfb \
     x11-utils \
@@ -42,10 +35,6 @@ RUN apt-get update && apt-get install -y \
     file \
     zstd \
     libarchive-tools \
-    # AppImage building and desktop metadata validation
-    libfuse2 \
-    appstream \
-    desktop-file-utils \
     # Utilities
     vim \
     tree \
@@ -57,14 +46,6 @@ RUN localedef -i en_US -f UTF-8 en_US.UTF-8 && \
     localedef -i fr_BE -f UTF-8 fr_BE.UTF-8 && \
     localedef -i fr_CA -f UTF-8 fr_CA.UTF-8 && \
     localedef -i de_DE -f UTF-8 de_DE.UTF-8
-
-# yt-dlp: the noble apt build (2024.04.09) predates --plugin-dirs (added in
-# 2024.10.22), which the media output-name postprocessor plugin requires
-# (MediaOutputNames). Install the official self-contained binary instead of
-# the distro package.
-RUN curl -fSL --retry 3 -o /usr/local/bin/yt-dlp \
-        https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    && chmod 755 /usr/local/bin/yt-dlp
 
 # Install the matching Chromium build for headless media discovery. Keep the
 # browser available to the non-root development user; probes never download it.
@@ -90,8 +71,7 @@ RUN if [ "$ODM_UID" != 0 ]; then \
         if ! getent group "$ODM_GID" >/dev/null; then groupadd -g "$ODM_GID" developer; fi; \
         useradd -m -d /home/developer -s /bin/bash -u "$ODM_UID" -g "$ODM_GID" developer; \
     else mkdir -p /home/developer; fi && \
-    mkdir -p /app /home/developer/.m2 /home/developer/.cache \
-        /home/developer/.local/share && \
+    mkdir -p /app /home/developer/.m2 && \
     chown -R "$ODM_UID:$ODM_GID" /app /home/developer
 
 WORKDIR /app

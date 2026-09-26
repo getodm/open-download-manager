@@ -11,12 +11,12 @@ help: ## Show this help message
 	@echo "  build     Build Docker image"
 	@echo "  dev       Start development container"
 	@echo "  test      Run tests excluding integration/E2E and performance suites"
-	@echo "  test-integration  Run tests including integration/E2E suites"
+	@echo "  test-integration  Run only integration/E2E tests"
 	@echo "  test-perf Run performance benchmarks only"
 	@echo "  compile   Build application"
 	@echo "  run       Run application in Docker with Xvfb"
 	@echo "  debug     Run application in debug mode (port 5005)"
-	@echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst/.AppImage)"
+	@echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst)"
 	@echo "  verify    Verify the built distribution packages"
 	@echo "  clean     Clean up Docker resources"
 	@echo ""
@@ -24,10 +24,11 @@ help: ## Show this help message
 	@echo "  make build    # Build the Docker image"
 	@echo "  make dev      # Start development environment"
 	@echo "  make test     # Run the default test suite"
+	@echo "  make test-integration # Run the separate integration/E2E suite"
 	@echo "  make test-perf # Run performance benchmarks"
 	@echo "  make run      # Run application with GUI support"
 	@echo "  make debug    # Run application in debug mode"
-	@echo "  make package  # Create .deb, .rpm, .pkg.tar.zst and .AppImage packages"
+	@echo "  make package  # Create .deb, .rpm and .pkg.tar.zst packages"
 	@echo "  make verify   # Verify all distribution packages"
 
 build: ## Build Docker image
@@ -39,7 +40,7 @@ dev: ## Start development container
 test: ## Run the default suite without integration/E2E or performance tests
 	./docker-build.sh test
 
-test-integration: ## Run tests including integration/E2E suites (-Pintegration)
+test-integration: ## Run only integration/E2E tests (-Pintegration)
 	./docker-build.sh test-integration
 
 test-perf: ## Run performance benchmarks only (-Pperf)

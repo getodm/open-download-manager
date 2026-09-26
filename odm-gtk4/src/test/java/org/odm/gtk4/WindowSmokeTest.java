@@ -9,15 +9,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.foreign.MemoryLayout;
+import java.lang.foreign.ValueLayout;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.gnome.gdk.Rectangle;
 import org.gnome.glib.MainContext;
+import org.gnome.gobject.GObject;
 import org.gnome.gtk.Align;
 import org.gnome.gtk.ApplicationWindow;
 import org.gnome.gtk.Box;
@@ -77,8 +82,59 @@ import org.junit.jupiter.api.Test;
 class WindowSmokeTest {
 
     @BeforeAll
-    static void initGtk() {
+    static void initGtk() throws ClassNotFoundException {
+        Class.forName("org.gnome.glib.GLib");
+        Class.forName("org.gnome.glib.MainContext");
+        // Own the context until this test JVM exits, including between event
+        // iterations. Otherwise Java-GI can destroy GTK objects on its Cleaner thread.
+        assertTrue(MainContext.default_().acquire(), "Could not own the GTK main context");
         Gtk.init();
+    }
+
+    @Test
+    @DisplayName("Background native callbacks wait for the GTK thread")
+    void backgroundMainContextCallbacksStayOnGtkThread() throws Exception {
+        MainContext context = MainContext.default_();
+        Thread gtkThread = Thread.currentThread();
+        AtomicReference<Thread> callbackThread = new AtomicReference<>();
+
+        // Java-GI's Cleaner uses this same native dispatch path.
+        CompletableFuture.runAsync(() -> context.invoke(() -> {
+            callbackThread.set(Thread.currentThread());
+            return false;
+        })).get(5, TimeUnit.SECONDS);
+
+        assertNull(callbackThread.get(),
+                "native cleanup must wait for the GTK thread to iterate its context");
+        while (context.pending()) {
+            context.iteration(false);
+        }
+        assertSame(gtkThread, callbackThread.get(),
+                "native GTK callbacks must not execute on a background thread");
+    }
+
+    @Test
+    @DisplayName("Enumerating builder objects preserves their native ownership")
+    void builderEnumerationPreservesNativeOwnership() {
+        GtkBuilder builder = GtkBuilder.fromString("""
+                <interface>
+                  <object class="GtkTextBuffer" id="buffer"/>
+                </interface>
+                """, -1);
+        var objects = UiLoader.objects(builder);
+        var address = objects.handle().reinterpret(ValueLayout.ADDRESS.byteSize())
+                .get(ValueLayout.ADDRESS, 0);
+        var nativeObject = address.reinterpret(GObject.getMemoryLayout().byteSize());
+        long refCountOffset = GObject.getMemoryLayout()
+                .byteOffset(MemoryLayout.PathElement.groupElement("ref_count"));
+        int builderReferences = nativeObject.get(ValueLayout.JAVA_INT, refCountOffset);
+
+        GObject buffer = objects.getFirst();
+        assertEquals(builderReferences + 1, nativeObject.get(ValueLayout.JAVA_INT, refCountOffset),
+                "the Java wrapper must own a reference in addition to the builder's reference");
+        assertSame(buffer, UiLoader.objects(builder).getFirst());
+        assertEquals(builderReferences + 1, nativeObject.get(ValueLayout.JAVA_INT, refCountOffset),
+                "enumerating the same object again must not leak another reference");
     }
 
     @Test
@@ -1961,7 +2017,7 @@ class WindowSmokeTest {
                 "search-torrents", "import-list", "import-sequence", "jackett-settings", "sources")) {
             GtkBuilder builder = UiLoader.load("/ui/" + resource + ".ui");
             try {
-                for (var object : builder.getObjects()) {
+                for (var object : UiLoader.objects(builder)) {
                     if (!(object instanceof TreeView tree)) {
                         continue;
                     }
@@ -1986,7 +2042,7 @@ class WindowSmokeTest {
                     }
                 }
             } finally {
-                for (var object : builder.getObjects()) {
+                for (var object : UiLoader.objects(builder)) {
                     if (object instanceof Window window) {
                         window.destroy();
                     }

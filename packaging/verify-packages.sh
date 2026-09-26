@@ -10,8 +10,7 @@ trap 'rm -rf "$CHECK_ROOT"' EXIT
 DEB="$DIST/open-download-manager_${VERSION}_amd64.deb"
 RPM="$DIST/open-download-manager-${VERSION}-1.x86_64.rpm"
 ARCH="$DIST/open-download-manager-${VERSION}-1-x86_64.pkg.tar.zst"
-APPIMAGE="$DIST/Open_Download_Manager-${VERSION}-x86_64.AppImage"
-for artifact in "$DEB" "$RPM" "$ARCH" "$APPIMAGE"; do test -s "$artifact"; done
+for artifact in "$DEB" "$RPM" "$ARCH"; do test -s "$artifact"; done
 [[ "$(dpkg-deb -f "$DEB" Version)" == "$VERSION" ]]
 [[ "$(dpkg-deb -f "$DEB" Architecture)" == amd64 ]]
 [[ "$(rpm --dbpath "$CHECK_ROOT/rpmdb" -qp --qf '%{VERSION}-%{RELEASE}' "$RPM")" == "$VERSION-1" ]]
@@ -64,10 +63,6 @@ for format in deb rpm arch; do
     grep -qx 'MimeType=x-scheme-handler/magnet;' "$root/usr/share/applications/org.odm.desktop"
     grep -qx 'Icon=open-download-manager' "$root/usr/share/applications/org.odm.desktop"
     grep -qx 'StartupWMClass=org.odm' "$root/usr/share/applications/org.odm.desktop"
-    test -s "$root/usr/share/metainfo/org.odm.metainfo.xml"
-    grep -q '<id>org.odm</id>' "$root/usr/share/metainfo/org.odm.metainfo.xml"
-    grep -q '<launchable type="desktop-id">org.odm.desktop</launchable>' "$root/usr/share/metainfo/org.odm.metainfo.xml"
-    grep -q "<release version=\"${VERSION}\"" "$root/usr/share/metainfo/org.odm.metainfo.xml"
     test -s "$root/usr/share/icons/hicolor/scalable/apps/open-download-manager.svg"
     cmp "$PACKAGE_ROOT/../odm-gtk4/src/main/resources/icons/hicolor/16x16/apps/open-download-manager.svg" \
         "$root/usr/share/icons/hicolor/16x16/apps/open-download-manager.svg"
@@ -227,39 +222,4 @@ grep -q 'MainWindow constructed' "$CHECK_ROOT/launcher.log"
 if grep -Eq 'Startup failed|NoClassDefFoundError|NoSuchMethodError' "$CHECK_ROOT/launcher.log"; then
     exit 1
 fi
-
-# ---- AppImage ----
-mkdir "$CHECK_ROOT/appimage"
-chmod 755 "$APPIMAGE"
-(cd "$CHECK_ROOT/appimage" && "$APPIMAGE" --appimage-extract >/dev/null)
-SQ_ROOT="$CHECK_ROOT/appimage/squashfs-root"
-test -x "$SQ_ROOT/AppRun"
-test -s "$SQ_ROOT/open-download-manager.desktop"
-grep -qx 'Exec=AppRun %U' "$SQ_ROOT/open-download-manager.desktop"
-grep -qx 'Icon=open-download-manager' "$SQ_ROOT/open-download-manager.desktop"
-test -s "$SQ_ROOT/open-download-manager.png"
-test -e "$SQ_ROOT/.DirIcon"
-test -x "$SQ_ROOT/usr/bin/aria2c"
-test -s "$SQ_ROOT/usr/lib/x86_64-linux-gnu/libgtk-4.so.1"
-test -s "$SQ_ROOT/usr/lib/x86_64-linux-gnu/girepository-1.0/Gtk-4.0.typelib"
-test -s "$SQ_ROOT/usr/share/metainfo/org.odm.metainfo.xml"
-# The AppImage payload must be byte-identical to the system packages.
-cmp "$SQ_ROOT/opt/open-download-manager/odm.jar" "$APP_ROOT/odm.jar"
-# Bundled aria2c runs against the bundled library set.
-LD_LIBRARY_PATH="$SQ_ROOT/usr/lib/x86_64-linux-gnu" \
-    "$SQ_ROOT/usr/bin/aria2c" --version | grep -q 'aria2 version 1\.37\.'
-# Bounded GUI launch through AppRun exercises the bundled GTK4 stack.
-set +e
-XDG_CONFIG_HOME="$CHECK_ROOT/config-ai" XDG_DATA_HOME="$CHECK_ROOT/data-ai" XDG_STATE_HOME="$CHECK_ROOT/state-ai" XDG_CACHE_HOME="$CHECK_ROOT/cache-ai" \
-    xvfb-run -a timeout -k 10s 25s "$SQ_ROOT/AppRun" > "$CHECK_ROOT/appimage.log" 2>&1
-appimage_status=$?
-set -e
-cat "$CHECK_ROOT/appimage.log"
-[[ "$appimage_status" == 124 ]]
-grep -q 'MainWindow constructed' "$CHECK_ROOT/appimage.log"
-if grep -Eq 'Startup failed|NoClassDefFoundError|NoSuchMethodError|cannot open shared object file' "$CHECK_ROOT/appimage.log"; then
-    exit 1
-fi
-echo 'AppImage payload, bundled GTK stack and AppRun launcher passed'
-
-echo 'All four package formats and the bundled launcher passed'
+echo 'All three package formats and the bundled launcher passed'

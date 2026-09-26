@@ -153,8 +153,8 @@ test() {
         bash -c "$(worktree_write_guard)Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 & sleep 2 && mvn test"
 }
 
-# Include integration/E2E (-Pintegration clears the filename excludes).
-# Performance benchmarks remain excluded unless -Pperf is selected.
+# Run only integration/E2E tests. The parent profile selects the same cases
+# excluded by the regular suite, including in modules with no integration tests.
 test_integration() {
     prepare_m2
     log "Running integration tests..."
@@ -238,12 +238,12 @@ help() {
     echo "  build     Build Docker image"
     echo "  dev       Start development container"
     echo "  test      Run tests excluding integration/E2E and performance suites"
-    echo "  test-integration  Run tests including integration/E2E suites (-Pintegration)"
+    echo "  test-integration  Run only integration/E2E tests (-Pintegration)"
     echo "  test-perf Run performance benchmarks only (-Pperf)"
     echo "  compile   Build application"
     echo "  run       Run application with GUI support"
     echo "  debug     Run application in debug mode (port 5005)"
-    echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst/.AppImage)"
+    echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst)"
     echo "  verify    Verify the built distribution packages"
     echo "  clean     Clean up Docker resources"
     echo "  help      Show this help"

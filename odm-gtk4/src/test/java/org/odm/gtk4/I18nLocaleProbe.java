@@ -65,7 +65,7 @@ public final class I18nLocaleProbe {
                 "sources", "start-shutdown")) {
             GtkBuilder builder = UiLoader.load("/ui/" + ui + ".ui");
             builders.add(builder);
-            for (var object : builder.getObjects()) {
+            for (var object : UiLoader.objects(builder)) {
                 if (object instanceof Window window) { windows.add(window); }
             }
             if (ui.equals("settings")) {
