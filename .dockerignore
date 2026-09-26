@@ -57,5 +57,12 @@ local.properties
 test-results/
 coverage/
 
+# Native package/AppImage staging can contain an entire runtime and toolchain.
+packaging/stage*
+packaging/dist/
+packaging/target/
+packaging/rpmbuild/
+packaging/archbuild/
+
 # Downloads directory
 downloads/

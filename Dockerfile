@@ -1,4 +1,6 @@
-FROM eclipse-temurin:25-jdk
+# The catalog tests on Ubuntu 22.04; every bundled native library must run
+# with its glibc 2.35. Build the required GTK version on that baseline.
+FROM eclipse-temurin:25-jdk-jammy
 
 # Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,6 +15,16 @@ RUN apt-get update && apt-get install -y \
     locales \
     curl \
     wget \
+    build-essential \
+    ninja-build \
+    python3-pip \
+    python3-packaging \
+    libpcre2-dev \
+    libffi-dev \
+    libmount-dev \
+    libxml2-dev \
+    libdrm-dev \
+    libtiff-dev \
     # GTK libraries for java-gi (GTK4)
     libgtk-4-dev \
     libglib2.0-dev \
@@ -22,23 +34,52 @@ RUN apt-get update && apt-get install -y \
     httrack \
     proxychains4 \
     tor \
-    yt-dlp \
+    ffmpeg \
     subliminal \
     # X11 for GUI testing
     xvfb \
     x11-utils \
     dbus-x11 \
+    xauth \
+    xdotool \
     # Package building tools
     dpkg-dev \
     fakeroot \
     rpm \
     file \
     zstd \
+    zsync \
     libarchive-tools \
+    patchelf \
+    desktop-file-utils \
+    appstream \
+    libfile-mimeinfo-perl \
     # Utilities
     vim \
     tree \
     && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir meson==1.4.2
+COPY packaging/appimage/build-gtk.sh /tmp/odm-build-gtk.sh
+RUN bash /tmp/odm-build-gtk.sh && rm /tmp/odm-build-gtk.sh
+ENV PKG_CONFIG_PATH=/opt/odm-gtk/lib/pkgconfig:/opt/odm-gtk/share/pkgconfig
+ENV LD_LIBRARY_PATH=/opt/odm-gtk/lib
+ENV XDG_DATA_DIRS=/opt/odm-gtk/share:/usr/local/share:/usr/share
+
+# Pin upstream binaries and check their published SHA256 digests. Reuse the
+# verified appimagetool's own type-2 runtime instead of a moving runtime URL.
+RUN mkdir -p /opt/odm-appimage && \
+    curl -fL --retry 3 https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage -o /opt/odm-appimage/appimagetool && \
+    echo 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /opt/odm-appimage/appimagetool' | sha256sum -c - && \
+    chmod 755 /opt/odm-appimage/appimagetool && \
+    head -c "$(/opt/odm-appimage/appimagetool --appimage-offset)" /opt/odm-appimage/appimagetool > /opt/odm-appimage/runtime-x86_64 && \
+    curl -fL --retry 3 https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux -o /usr/local/bin/yt-dlp && \
+    echo '58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a  /usr/local/bin/yt-dlp' | sha256sum -c - && \
+    chmod 755 /usr/local/bin/yt-dlp && \
+    curl -fL --retry 3 https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.08.19/LICENSE -o /opt/odm-appimage/yt-dlp-LICENSE && \
+    for name in excludelist appdir-lint.sh; do \
+        curl -fL --retry 3 "https://raw.githubusercontent.com/AppImage/AppImages/19e30b276ffedf4d3b4b56bc6320f463625a74f8/$name" -o "/opt/odm-appimage/$name"; \
+    done
 
 # Exercise gettext with installed desktop locales, including French regional fallback.
 RUN localedef -i en_US -f UTF-8 en_US.UTF-8 && \

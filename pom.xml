@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.odm</groupId>
     <artifactId>odm</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
     <packaging>pom</packaging>
     <name>odm</name>
     <description>A full featured native download manager for Linux based on aria2, yt-dlp and httrack</description>

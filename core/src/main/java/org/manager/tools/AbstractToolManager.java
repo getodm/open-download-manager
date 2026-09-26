@@ -81,6 +81,16 @@ public abstract class AbstractToolManager implements ToolManager {
             return configuredPath;
         }
 
+        // AppImage mounts change at every launch. Resolve its tools from the
+        // current launcher directory without persisting a stale mount path.
+        String bundledDirectory = System.getProperty("odm.tools.directory");
+        if (bundledDirectory != null && !bundledDirectory.isBlank()) {
+            Path bundledTool = Path.of(bundledDirectory).resolve(getExecutableName());
+            if (Files.isRegularFile(bundledTool) && Files.isExecutable(bundledTool)) {
+                return bundledTool.toAbsolutePath().toString();
+            }
+        }
+
         // Try embedded binary
         if (supportsEmbeddedBinary()) {
             String embeddedPath = getEmbeddedBinaryPath();

@@ -16,7 +16,7 @@ help: ## Show this help message
 	@echo "  compile   Build application"
 	@echo "  run       Run application in Docker with Xvfb"
 	@echo "  debug     Run application in debug mode (port 5005)"
-	@echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst)"
+	@echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst/AppImage)"
 	@echo "  verify    Verify the built distribution packages"
 	@echo "  clean     Clean up Docker resources"
 	@echo ""
@@ -28,7 +28,7 @@ help: ## Show this help message
 	@echo "  make test-perf # Run performance benchmarks"
 	@echo "  make run      # Run application with GUI support"
 	@echo "  make debug    # Run application in debug mode"
-	@echo "  make package  # Create .deb, .rpm and .pkg.tar.zst packages"
+	@echo "  make package  # Create .deb, .rpm, .pkg.tar.zst and AppImage packages"
 	@echo "  make verify   # Verify all distribution packages"
 
 build: ## Build Docker image

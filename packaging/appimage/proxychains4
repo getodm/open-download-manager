@@ -1,0 +1,26 @@
+#!/bin/sh
+# proxychains 4.16 searches beside its executable for the preload library.
+# LD_PRELOAD splits paths on spaces, so run both files from a private path
+# without whitespace, including when the AppImage itself has a spaced path.
+set -eu
+APPDIR="$(dirname "$(dirname "$(dirname "$(readlink -f "$0")")")")"
+proxy_dir=$(mktemp -d /tmp/odm-proxychains.XXXXXXXX)
+proxy_pid=
+cleanup() {
+    if [ -n "$proxy_pid" ]; then
+        kill "$proxy_pid" 2>/dev/null || true
+        wait "$proxy_pid" 2>/dev/null || true
+    fi
+    rm -rf "$proxy_dir"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+cp "$APPDIR/usr/libexec/proxychains4" "$proxy_dir/proxychains4"
+cp "$APPDIR/usr/lib/odm/libproxychains.so.4" "$proxy_dir/libproxychains.so.4"
+"$proxy_dir/proxychains4" "$@" &
+proxy_pid=$!
+status=0
+wait "$proxy_pid" || status=$?
+proxy_pid=
+exit "$status"

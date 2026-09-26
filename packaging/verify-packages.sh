@@ -10,7 +10,8 @@ trap 'rm -rf "$CHECK_ROOT"' EXIT
 DEB="$DIST/open-download-manager_${VERSION}_amd64.deb"
 RPM="$DIST/open-download-manager-${VERSION}-1.x86_64.rpm"
 ARCH="$DIST/open-download-manager-${VERSION}-1-x86_64.pkg.tar.zst"
-for artifact in "$DEB" "$RPM" "$ARCH"; do test -s "$artifact"; done
+APPIMAGE="$DIST/Open_Download_Manager-${VERSION}-x86_64.AppImage"
+for artifact in "$DEB" "$RPM" "$ARCH" "$APPIMAGE" "$APPIMAGE.zsync"; do test -s "$artifact"; done
 [[ "$(dpkg-deb -f "$DEB" Version)" == "$VERSION" ]]
 [[ "$(dpkg-deb -f "$DEB" Architecture)" == amd64 ]]
 [[ "$(rpm --dbpath "$CHECK_ROOT/rpmdb" -qp --qf '%{VERSION}-%{RELEASE}' "$RPM")" == "$VERSION-1" ]]
@@ -74,6 +75,23 @@ for format in deb rpm arch; do
 done
 diff -u "$CHECK_ROOT/deb.sha256" "$CHECK_ROOT/rpm.sha256"
 diff -u "$CHECK_ROOT/deb.sha256" "$CHECK_ROOT/arch.sha256"
+# AppImage must contain the same application/runtime plus its native closure.
+mkdir "$CHECK_ROOT/appimage"
+(cd "$CHECK_ROOT/appimage" && "$APPIMAGE" --appimage-extract >/dev/null)
+APPDIR="$CHECK_ROOT/appimage/squashfs-root"
+test -x "$APPDIR/AppRun"
+(cd "$APPDIR" && sha256sum -c "$CHECK_ROOT/deb.sha256" >/dev/null)
+desktop-file-validate "$APPDIR/io.github.getodm.OpenDownloadManager.desktop"
+env -u LD_LIBRARY_PATH appstreamcli validate --no-net "$APPDIR/usr/share/metainfo/io.github.getodm.OpenDownloadManager.appdata.xml"
+env -u LD_LIBRARY_PATH bash /opt/odm-appimage/appdir-lint.sh "$APPDIR"
+test "$(file -Lb --mime-type "$APPDIR/.DirIcon")" = image/png
+for tool in aria2c curl yt-dlp httrack ffmpeg ffprobe proxychains4 tor; do
+    test -x "$APPDIR/usr/bin/$tool"
+done
+test -s "$APPDIR/usr/lib/odm/libgtk-4.so.1"
+if find "$APPDIR" -name 'libc.so*' -o -name 'ld-linux*' | grep . >/dev/null; then
+    echo 'AppImage contains the host C library or loader' >&2; exit 1
+fi
 APP_ROOT="$CHECK_ROOT/deb/opt/open-download-manager"
 python3 - "$APP_ROOT/odm.jar" <<'PYNATIVES'
 import sys, zipfile
@@ -222,4 +240,4 @@ grep -q 'MainWindow constructed' "$CHECK_ROOT/launcher.log"
 if grep -Eq 'Startup failed|NoClassDefFoundError|NoSuchMethodError' "$CHECK_ROOT/launcher.log"; then
     exit 1
 fi
-echo 'All three package formats and the bundled launcher passed'
+echo 'All four package formats and the bundled launcher passed'

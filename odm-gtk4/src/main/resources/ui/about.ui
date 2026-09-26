@@ -3,7 +3,7 @@
   <requires lib="gtk" version="4.0"/>
   <object class="GtkAboutDialog" id="about_dialog">
     <property name="program-name">oDM</property>
-    <property name="version">0.3.0</property>
+    <property name="version">0.3.1</property>
     <property name="website">https://github.com/albilu/odm</property>
     <property name="authors">albilu</property>
     <property name="license-type">gpl-3-0</property>

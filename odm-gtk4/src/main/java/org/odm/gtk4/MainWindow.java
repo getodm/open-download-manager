@@ -433,6 +433,9 @@ public class MainWindow {
             }
         });
         this.searchEntry = Widgets.require(builder, "search_entry", org.gnome.gtk.SearchEntry.class);
+        // Use the visible search field instead of TreeView's internal popup,
+        // which emits GTK CSS criticals on keyboard input with GTK 4.14.
+        downloadsTreeview.setSearchEntry(searchEntry);
         searchEntry.onSearchChanged(this::onSearchChanged);
         this.torCheckButton = Widgets.require(builder, "tor_check_button", Button.class);
         installStatusBarCss();

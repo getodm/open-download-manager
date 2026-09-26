@@ -194,7 +194,7 @@ compile() {
 # Create packages
 package() {
     prepare_m2
-    local version="${1:-0.3.0}"
+    local version="${1:-0.3.1}"
     if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){1,3}$ ]]; then
         echo "Invalid package version: expected numeric dotted version" >&2
         return 2
@@ -209,7 +209,7 @@ package() {
 
 # Verify the built packages (same container requirements as package).
 verify() {
-    local version="${1:-0.3.0}"
+    local version="${1:-0.3.1}"
     if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){1,3}$ ]]; then
         echo "Invalid package version: expected numeric dotted version" >&2
         return 2
@@ -243,7 +243,7 @@ help() {
     echo "  compile   Build application"
     echo "  run       Run application with GUI support"
     echo "  debug     Run application in debug mode (port 5005)"
-    echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst)"
+    echo "  package   Create distribution packages (.deb/.rpm/.pkg.tar.zst/AppImage)"
     echo "  verify    Verify the built distribution packages"
     echo "  clean     Clean up Docker resources"
     echo "  help      Show this help"

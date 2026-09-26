@@ -1,0 +1,35 @@
+#!/bin/sh
+# Resolve every path at launch: FUSE mounts and extracted AppDirs can move.
+# Private RUNPATHs keep our native libraries out of host processes.
+set -eu
+APPDIR="$(dirname "$(readlink -f "$0")")"
+APP_HOME="$APPDIR/opt/open-download-manager"
+export PATH="$APPDIR/usr/bin:$PATH"
+export XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+
+cache_dir=$(mktemp -d "${TMPDIR:-/tmp}/odm-appimage.XXXXXXXX")
+app_pid=
+cleanup() {
+    if [ -n "$app_pid" ]; then
+        kill "$app_pid" 2>/dev/null || true
+        wait "$app_pid" 2>/dev/null || true
+    fi
+    rm -rf "$cache_dir"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+export GDK_PIXBUF_MODULEDIR="$APPDIR/usr/lib/odm/gdk-pixbuf-loaders"
+export GDK_PIXBUF_MODULE_FILE="$cache_dir/loaders.cache"
+"$APPDIR/usr/libexec/gdk-pixbuf-query-loaders" > "$GDK_PIXBUF_MODULE_FILE"
+
+"$APP_HOME/runtime/bin/java" --enable-native-access=ALL-UNNAMED \
+    "-Djavagi.path=$APPDIR/usr/lib/odm" \
+    "-Djava.library.path=$APPDIR/usr/lib/odm" \
+    "-Dodm.tools.directory=$APPDIR/usr/bin" \
+    -jar "$APP_HOME/odm.jar" "$@" &
+app_pid=$!
+status=0
+wait "$app_pid" || status=$?
+app_pid=
+exit "$status"

@@ -91,6 +91,18 @@ public final class I18n {
                         throw new IllegalStateException("No UTF-8 system locale is available");
                     }
                 }
+                // glibc 2.35 still honors LANGUAGE for C.UTF-8, unlike newer
+                // glibc and our SystemLocale policy. Normalize it before GTK
+                // initializes so native widgets and Java labels agree.
+                String messageLocale = org.manager.util.SystemLocale.messageLocaleName(System.getenv());
+                String baseLocale = messageLocale.split("[.@]", 2)[0];
+                if (baseLocale.equals("C") || baseLocale.equals("POSIX")) {
+                    MethodHandle setenv = function("setenv", ValueLayout.JAVA_INT,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT);
+                    int status = (int) setenv.invokeExact(arena.allocateFrom("LANGUAGE"),
+                            arena.allocateFrom("en"), 1);
+                    if (status != 0) { throw new IllegalStateException("Could not select the C message locale"); }
+                }
                 Path directory = extractCatalogs();
                 bind("bindtextdomain", arena.allocateFrom(directory.toString()));
                 bind("bind_textdomain_codeset", arena.allocateFrom("UTF-8"));

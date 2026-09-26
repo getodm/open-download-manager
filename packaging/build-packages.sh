@@ -1,8 +1,7 @@
 #!/bin/bash
 # Package builder for Open Download Manager (GTK4).
 # Builds the shaded jar + a self-contained jlink runtime, then assembles
-# .deb / .rpm / .pkg.tar.zst installers. Run inside the odm-dev Docker
-# image (or any Linux with JDK 25, maven, dpkg-deb, rpmbuild, makepkg).
+# .deb / .rpm / .pkg.tar.zst / AppImage artifacts. Run inside odm-dev.
 set -euo pipefail
 
 # Package metadata and the shaded native libraries target Linux amd64.
@@ -47,6 +46,7 @@ log "Assembling application tree under $STAGE..."
 rm -rf "$STAGE"
 mkdir -p "$DIST" "$APP" "$RUNTIME" "$STAGE/usr/bin" \
     "$STAGE/usr/share/applications" \
+    "$STAGE/usr/share/metainfo" \
     "$STAGE/usr/share/doc/open-download-manager" \
     "$STAGE/usr/share/licenses/open-download-manager" \
     "$STAGE/usr/share/icons/hicolor"
@@ -84,6 +84,7 @@ EOF
 chmod 755 "$STAGE/usr/bin/open-download-manager"
 
 cp packaging/resources/open-download-manager.desktop "$STAGE/usr/share/applications/org.odm.desktop"
+cp packaging/resources/io.github.getodm.OpenDownloadManager.appdata.xml "$STAGE/usr/share/metainfo/"
 cp -a odm-gtk4/src/main/resources/icons/hicolor/. "$STAGE/usr/share/icons/hicolor/"
 
 log "Stage complete:"
@@ -200,10 +201,37 @@ EOF
     log "Built dist/open-download-manager-${VERSION}-1-x86_64.pkg.tar.zst"
 }
 
+# AppImage extends the same payload with GTK and the download tools.
+build_appimage() {
+    log "Building AppImage..."
+    local appdir="$ROOT/packaging/target/OpenDownloadManager.AppDir"
+    rm -rf "$appdir"
+    mkdir -p "$appdir"
+    cp -a "$STAGE/." "$appdir/"
+    python3 packaging/appimage/bundle-native.py "$appdir"
+    install -m 755 packaging/appimage/AppRun "$appdir/AppRun"
+    cp "$STAGE/usr/share/applications/org.odm.desktop" "$appdir/io.github.getodm.OpenDownloadManager.desktop"
+    cp "$STAGE/usr/share/icons/hicolor/512x512/apps/open-download-manager.png" "$appdir/"
+    ln -s open-download-manager.png "$appdir/.DirIcon"
+    desktop-file-validate "$appdir/io.github.getodm.OpenDownloadManager.desktop"
+    env -u LD_LIBRARY_PATH appstreamcli validate --no-net "$appdir/usr/share/metainfo/io.github.getodm.OpenDownloadManager.appdata.xml"
+    env -u LD_LIBRARY_PATH bash /opt/odm-appimage/appdir-lint.sh "$appdir"
+    # appimagetool writes the zsync sidecar into its working directory.
+    (
+        cd "$DIST"
+        ARCH=x86_64 /opt/odm-appimage/appimagetool --appimage-extract-and-run \
+            --runtime-file /opt/odm-appimage/runtime-x86_64 \
+            --updateinformation 'gh-releases-zsync|getodm|open-download-manager|latest|Open_Download_Manager-*-x86_64.AppImage.zsync' \
+            "$appdir" "Open_Download_Manager-${VERSION}-x86_64.AppImage"
+    )
+    rm -rf "$appdir"
+}
+
 build_deb
 build_rpm
 build_arch
+build_appimage
 
 log "Artifacts:"
-ls -la "$DIST/"*.deb "$DIST/"*.rpm "$DIST/"*.pkg.tar.zst 2>/dev/null || true
+ls -la "$DIST/"*.deb "$DIST/"*.rpm "$DIST/"*.pkg.tar.zst "$DIST/"*.AppImage*
 log "Done."
