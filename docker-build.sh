@@ -5,6 +5,13 @@ set -e
 PROJECT_NAME="open-download-manager"
 IMAGE_NAME="${ODM_IMAGE_NAME:-odm-dev}"
 
+# Root callers (act job containers) must not clobber the developer's image
+# with a USER 0 variant: build under a separate tag. worktree_write_guard
+# below repairs the file ownership side effect.
+if [ "$(id -u)" = 0 ] && [ -z "${ODM_IMAGE_NAME:-}" ]; then
+    IMAGE_NAME="odm-dev-uid0"
+fi
+
 # Colors
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -35,6 +42,16 @@ xauth_args() {
     echo " -e XAUTHORITY=/tmp/odm-xauthority -v $host_auth:/tmp/odm-xauthority:rw"
 }
 
+# Containers spawned by a root caller run as root (ODM_UID=0 image) and would
+# otherwise leave root-owned files in the bind-mounted worktree. When the
+# caller is root, prepend an EXIT trap that hands anything root-owned back to
+# the worktree owner (visible inside the container as the owner of /app).
+worktree_write_guard() {
+    if [ "$(id -u)" = 0 ]; then
+        printf '%s' "trap 'chown -R --from=0:0 \$(stat -c %u:%g /app) /app 2>/dev/null || true' EXIT; "
+    fi
+}
+
 # Run application
 run() {
     prepare_m2
@@ -49,7 +66,7 @@ run() {
         -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
         --ipc=host \
         $IMAGE_NAME \
-        bash -c 'mvn -q -pl odm-gtk4 -am package -DskipTests=true && mvn -q -pl odm-gtk4 dependency:build-classpath -Dmdep.outputFile=/tmp/cp.txt && java -Djava.util.logging.level=FINE -Djava.util.logging.ConsoleHandler.level=FINE -cp "odm-gtk4/target/classes:core/target/classes:$(cat /tmp/cp.txt)" org.odm.gtk4.OdmApplication'
+        bash -c "$(worktree_write_guard)"'mvn -q -pl odm-gtk4 -am package -DskipTests=true && mvn -q -pl odm-gtk4 dependency:build-classpath -Dmdep.outputFile=/tmp/cp.txt && java -Djava.util.logging.level=FINE -Djava.util.logging.ConsoleHandler.level=FINE -cp "odm-gtk4/target/classes:core/target/classes:$(cat /tmp/cp.txt)" org.odm.gtk4.OdmApplication'
 }
 
 # Run application in debug mode
@@ -66,7 +83,7 @@ debug() {
         -p 5005:5005 \
         --ipc=host \
         $IMAGE_NAME \
-        bash -c 'mvn -q -pl odm-gtk4 -am package -DskipTests=true && mvn -q -pl odm-gtk4 dependency:build-classpath -Dmdep.outputFile=/tmp/cp.txt && java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=0.0.0.0:5005 -Djava.util.logging.level=FINE -Djava.util.logging.ConsoleHandler.level=FINE -cp "odm-gtk4/target/classes:core/target/classes:$(cat /tmp/cp.txt)" org.odm.gtk4.OdmApplication'
+        bash -c "$(worktree_write_guard)"'mvn -q -pl odm-gtk4 -am package -DskipTests=true && mvn -q -pl odm-gtk4 dependency:build-classpath -Dmdep.outputFile=/tmp/cp.txt && java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=0.0.0.0:5005 -Djava.util.logging.level=FINE -Djava.util.logging.ConsoleHandler.level=FINE -cp "odm-gtk4/target/classes:core/target/classes:$(cat /tmp/cp.txt)" org.odm.gtk4.OdmApplication'
 }
 
 # Build the Docker image. CI workflows export ODM_CACHE_FROM/ODM_CACHE_TO
@@ -133,7 +150,7 @@ test() {
         -e PROXYCHAINS_AVAILABLE=true \
         -e ENABLE_NETWORK_TESTS=true \
         $IMAGE_NAME \
-        bash -c "Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 & sleep 2 && mvn test"
+        bash -c "$(worktree_write_guard)Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 & sleep 2 && mvn test"
 }
 
 # Include integration/E2E (-Pintegration clears the filename excludes).
@@ -147,7 +164,7 @@ test_integration() {
         -e PROXYCHAINS_AVAILABLE=true \
         -e ENABLE_NETWORK_TESTS=true \
         $IMAGE_NAME \
-        bash -c "Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 & sleep 2 && mvn test -Pintegration"
+        bash -c "$(worktree_write_guard)Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 & sleep 2 && mvn test -Pintegration"
 }
 
 # Run only performance benchmarks, without coverage instrumentation.
@@ -158,7 +175,7 @@ test_perf() {
         -v "$(pwd):/app" \
         -v "$HOME/.m2:/home/developer/.m2" \
         $IMAGE_NAME \
-        bash -c "Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 & sleep 2 && mvn test -Pperf"
+        bash -c "$(worktree_write_guard)Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 & sleep 2 && mvn test -Pperf"
 }
 
 # Build application
@@ -169,7 +186,7 @@ compile() {
         -v "$(pwd):/app" \
         -v "$HOME/.m2:/home/developer/.m2" \
         $IMAGE_NAME \
-        mvn clean compile package -DskipTests=true
+        bash -c "$(worktree_write_guard)mvn clean compile package -DskipTests=true"
 }
 
 
@@ -187,7 +204,7 @@ package() {
         -v "$(pwd):/app" \
         -v "$HOME/.m2:/home/developer/.m2" \
         $IMAGE_NAME \
-        /app/packaging/build-packages.sh "$version"
+        bash -c "$(worktree_write_guard)/app/packaging/build-packages.sh $version"
 }
 
 # Verify the built packages (same container requirements as package).
@@ -201,7 +218,7 @@ verify() {
     docker run --init --rm \
         -v "$(pwd):/app" \
         $IMAGE_NAME \
-        /app/packaging/verify-packages.sh "$version"
+        bash -c "$(worktree_write_guard)/app/packaging/verify-packages.sh $version"
 }
 
 # Clean up. Only touches ODM resources: the dev container (if left over)
