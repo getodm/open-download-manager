@@ -218,26 +218,26 @@ class WindowSmokeTest {
         TreeIter statusRow = new TreeIter();
         statusStore.append(statusRow);
         ListStoreCells.setString(statusStore, statusRow, 0, "view-list-symbolic");
-        ListStoreCells.setInt(statusStore, statusRow, 1, 7);
+        ListStoreCells.setString(statusStore, statusRow, 1, "7/12");
         ListStoreCells.setString(statusStore, statusRow, 2, "All Status");
         statusColumn.cellSetCellData(statusStore, statusRow, false, false);
         countColumn.cellSetCellData(statusStore, statusRow, false, false);
         assertEquals("All Status", Widgets.require(builder,
                 "status_label_renderer", CellRendererText.class).getProperty("text"));
-        assertEquals("7", Widgets.require(builder,
+        assertEquals("7/12", Widgets.require(builder,
                 "status_count_renderer", CellRendererText.class).getProperty("text"));
 
         ListStore categoryStore = Widgets.require(builder, "category_store", ListStore.class);
         TreeIter categoryRow = new TreeIter();
         categoryStore.append(categoryRow);
         ListStoreCells.setString(categoryStore, categoryRow, 0, "video-x-generic-symbolic");
-        ListStoreCells.setInt(categoryStore, categoryRow, 1, 3);
+        ListStoreCells.setString(categoryStore, categoryRow, 1, "3/9");
         ListStoreCells.setString(categoryStore, categoryRow, 2, "Videos");
         categoryColumn.cellSetCellData(categoryStore, categoryRow, false, false);
         categoryCountColumn.cellSetCellData(categoryStore, categoryRow, false, false);
         assertEquals("Videos", Widgets.require(builder,
                 "category_label_renderer", CellRendererText.class).getProperty("text"));
-        assertEquals("3", Widgets.require(builder,
+        assertEquals("3/9", Widgets.require(builder,
                 "category_count_renderer", CellRendererText.class).getProperty("text"));
         PopoverMenuBar menuBar = Widgets.require(builder, "menu_bar", PopoverMenuBar.class);
         assertFalse(menuBar.getVexpand());

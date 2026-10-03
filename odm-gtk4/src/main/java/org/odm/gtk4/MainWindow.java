@@ -62,7 +62,9 @@ public class MainWindow {
 
     private record RefreshSnapshot(List<Download> downloads, int totalCount,
             int loadedHistoryCount,
-            java.util.Map<Download.Status, Integer> statusCounts) {
+            java.util.Map<Download.Status, Integer> statusCounts,
+            String searchText,
+            java.util.Map<DownloadListPresenter.FilterBucket, Integer> filterCounts) {
     }
 
     /** Applicability of selection-scoped context and Download-menu actions. */
@@ -2854,9 +2856,10 @@ public class MainWindow {
         }
         String selectedId = selectedDownload != null ? selectedDownload.getId() : null;
         int requestedHistoryLimit = historyFetchLimit;
+        String requestedSearch = listPresenter.searchText();
         try {
             CompletableFuture<RefreshSnapshot> refreshFuture = CompletableFuture.supplyAsync(
-                    () -> loadRefreshSnapshot(selectedId, requestedHistoryLimit),
+                    () -> loadRefreshSnapshot(selectedId, requestedHistoryLimit, requestedSearch),
                     backgroundExecutor);
             if (showActivity) {
                 trackActivity(refreshFuture);
@@ -2881,9 +2884,9 @@ public class MainWindow {
         }
     }
 
-    /** Loads the requested recent-history pages plus bounded active/queued
-     * status slices. Repository-wide status counts remain O(1) via indices. */
-    private RefreshSnapshot loadRefreshSnapshot(String selectedId, int requestedHistoryLimit) {
+    /** Loads bounded row slices and aggregates full-history filter counts off the GTK thread. */
+    private RefreshSnapshot loadRefreshSnapshot(String selectedId, int requestedHistoryLimit,
+            String searchText) {
         java.util.LinkedHashMap<String, Download> visible = new java.util.LinkedHashMap<>();
         List<Download> history = downloadManager.getDownloads(0, requestedHistoryLimit);
         addRefreshRows(visible, history);
@@ -2902,8 +2905,12 @@ public class MainWindow {
         for (Download.Status status : Download.Status.values()) {
             statusCounts.put(status, downloadManager.getDownloadCountByStatus(status));
         }
+        int totalCount = downloadManager.getDownloadCount();
+        var filterCounts = totalCount > history.size()
+                ? downloadManager.getDownloadCounts(download -> DownloadListPresenter.filterBucket(download, searchText))
+                : DownloadListPresenter.computeFilterBuckets(history, searchText);
         return new RefreshSnapshot(new java.util.ArrayList<>(visible.values()),
-                downloadManager.getDownloadCount(), history.size(), statusCounts);
+                totalCount, history.size(), statusCounts, searchText, filterCounts);
     }
 
     private static void addRefreshRows(java.util.Map<String, Download> target,
@@ -2920,6 +2927,11 @@ public class MainWindow {
 
     /** Applies an already-fetched repository snapshot on the GTK thread. */
     private void applyRefresh(RefreshSnapshot snapshot) {
+        if (!snapshot.searchText().equals(listPresenter.searchText())) {
+            // A newer search was entered while this background count was running.
+            refreshAgain.set(true);
+            return;
+        }
         List<String> selectedIds = selectedDownloads.stream()
                 .map(Download::getId)
                 .filter(java.util.Objects::nonNull)
@@ -2927,7 +2939,7 @@ public class MainWindow {
         loadedHistoryCount = snapshot.loadedHistoryCount();
         knownDownloadCount = snapshot.totalCount();
         DownloadListPresenter.RefreshSummary summary = listPresenter.refresh(
-                snapshot.downloads(), snapshot.totalCount(), snapshot.statusCounts());
+                snapshot.downloads(), snapshot.totalCount(), snapshot.filterCounts());
         if (summary.modelRebuilt()) {
             // Clearing GtkListStore clears GtkTreeSelection. Restore by stable
             // download id so queue moves and other structural refreshes keep

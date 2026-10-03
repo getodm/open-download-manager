@@ -88,6 +88,33 @@ class DownloadListPresenterTest {
     }
 
     @Test
+    void contextualCountsExcludeTheirOwnFilterAndRespectSearch() {
+        List<Download> downloads = List.of(
+                download("movie-one.mp4", Download.Status.QUEUED),
+                download("movie-two.mkv", Download.Status.CREATED),
+                download("song.mp3", Download.Status.QUEUED),
+                download("movie-done.mp4", Download.Status.COMPLETED),
+                download("movie-seed.mp4", Download.Status.SEEDING),
+                download("failed.zip", Download.Status.ERROR));
+
+        var buckets = DownloadListPresenter.computeFilterBuckets(downloads, "");
+        var counts = DownloadListPresenter.computeFilterCounts(buckets, "Videos", "Queued");
+        assertArrayEquals(new String[]{"4/6", "1", "1", "2/3", "0", "1", "0/1", "0"},
+                counts.statuses());
+        assertArrayEquals(new String[]{"3/6", "2/4", "1", "0", "0", "0/1"}, counts.categories());
+
+        var searchBuckets = DownloadListPresenter.computeFilterBuckets(downloads, "movie");
+        var empty = DownloadListPresenter.computeFilterCounts(searchBuckets, "Audios", "Queued");
+        assertArrayEquals(new String[]{"0/6", "0/1", "0/1", "0/3", "0", "0/1", "0/1", "0"},
+                empty.statuses());
+        assertArrayEquals(new String[]{"2/6", "2/4", "0/1", "0", "0", "0/1"}, empty.categories());
+
+        var cleared = DownloadListPresenter.computeFilterCounts(buckets, "All", "All Status");
+        assertEquals("6", cleared.statuses()[0], "Active and Seeding overlap without inflating All");
+        assertArrayEquals(new String[]{"6", "4", "1", "0", "0", "1"}, cleared.categories());
+    }
+
+    @Test
     void matchesFiltersCombinesSearchCategoryAndStatus() {
         Download movie = download("Holiday-Movie.mp4", Download.Status.DOWNLOADING);
 

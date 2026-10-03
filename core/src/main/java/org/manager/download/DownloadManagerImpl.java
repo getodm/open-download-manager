@@ -1859,6 +1859,11 @@ public class DownloadManagerImpl implements DownloadManager {
     }
 
     @Override
+    public <K> Map<K, Integer> getDownloadCounts(java.util.function.Function<Download, K> classifier) {
+        return downloadRepository.getDownloadCounts(classifier);
+    }
+
+    @Override
     public List<Download> getDownloadsByStatus(Download.Status status) {
         PaginatedDownloadRepository.DownloadPage page = downloadRepository.getDownloadsByStatus(status, 0,
                 Integer.MAX_VALUE);

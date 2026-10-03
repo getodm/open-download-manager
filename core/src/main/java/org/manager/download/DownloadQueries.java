@@ -3,6 +3,7 @@ package org.manager.download;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Read-only repository queries: lookups by id, status, and creation time
@@ -40,6 +41,13 @@ public interface DownloadQueries {
      * @return The total number of downloads
      */
     int getDownloadCount();
+
+    /**
+     * Counts the entire repository by a read-only classifier, independently of
+     * pagination. A null key excludes a download. The classifier must not modify
+     * the repository; implementations may invoke it under a read lock.
+     */
+    <K> Map<K, Integer> getDownloadCounts(Function<Download, K> classifier);
 
     /**
      * Gets downloads with the specified status.

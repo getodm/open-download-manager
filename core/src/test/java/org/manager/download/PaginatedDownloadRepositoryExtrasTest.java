@@ -53,6 +53,29 @@ class PaginatedDownloadRepositoryExtrasTest {
     }
 
     @Test
+    void groupedCountsCoverUnloadedRowsAndFollowChanges() throws Exception {
+        add("movie-one", Download.Status.COMPLETED);
+        add("movie-two", Download.Status.COMPLETED);
+        Download queued = add("movie-three", Download.Status.QUEUED);
+        add("audio", Download.Status.QUEUED);
+        assertEquals(2, repository.getAllDownloadsByOffset(0, 2).getDownloads().size());
+
+        java.util.function.Function<Download, Download.Status> movies = download ->
+                download.getName().startsWith("movie") ? download.getStatus() : null;
+        assertEquals(Map.of(Download.Status.COMPLETED, 2, Download.Status.QUEUED, 1),
+                repository.getDownloadCounts(movies));
+
+        repository.updateDownloadStatus(queued, Download.Status.COMPLETED);
+        assertEquals(Map.of(Download.Status.COMPLETED, 3), repository.getDownloadCounts(movies));
+        queued.setName("audio-renamed");
+        assertEquals(Map.of(Download.Status.COMPLETED, 2), repository.getDownloadCounts(movies));
+        repository.removeDownload(queued.getId());
+        assertEquals(Map.of(Download.Status.COMPLETED, 2, Download.Status.QUEUED, 1),
+                repository.getDownloadCounts(Download::getStatus));
+        assertEquals(Map.of(), repository.getDownloadCounts(download -> null));
+    }
+
+    @Test
     @DisplayName("cache statistics count hits, misses and invalidations")
     void cacheStatistics() throws Exception {
         Download download = add("cached", Download.Status.COMPLETED);

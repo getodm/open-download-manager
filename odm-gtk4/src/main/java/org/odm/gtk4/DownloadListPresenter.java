@@ -84,6 +84,13 @@ final class DownloadListPresenter {
             boolean modelRebuilt) {
     }
 
+    /** Small repository-wide groups retaining both search matches and global totals. */
+    record FilterBucket(String category, Download.Status status, boolean matchesSearch) {
+    }
+
+    record FilterCounts(String[] statuses, String[] categories) {
+    }
+
     private final ListStore statusStore;
     private final ListStore categoryStore;
     private final ListStore downloadsStore;
@@ -98,10 +105,8 @@ final class DownloadListPresenter {
     /** Tracks a logical row while GTK reorders the sorted ListStore. */
     private final Map<String, TreeRowReference> rowReferences = new HashMap<>();
     /** Last filter-store counts; filter stores rebuild only when these change. */
-    private int[] lastStatusCounts = new int[0];
-    private int[] lastCategoryCounts = new int[0];
-    private int lastStatusTotalCount = -1;
-    private int lastCategoryTotalCount = -1;
+    private String[] lastStatusCounts = new String[0];
+    private String[] lastCategoryCounts = new String[0];
 
     private String statusFilter = "All Status";
     /** Selected category filter (extension-based), "All" = no restriction. */
@@ -163,6 +168,10 @@ final class DownloadListPresenter {
     /** Search text (lowercased, stripped) or an empty string. */
     void setSearchText(String text) {
         searchText = text == null ? "" : text;
+    }
+
+    String searchText() {
+        return searchText;
     }
 
     /** Download backing the visible row index, or null past the end. */
@@ -306,14 +315,12 @@ final class DownloadListPresenter {
      * @return aggregate totals over ALL downloads (not just filtered rows)
      */
     RefreshSummary refresh(List<Download> downloads) {
-        return refresh(downloads, downloads.size(), null);
+        return refresh(downloads, downloads.size(), computeFilterBuckets(downloads, searchText));
     }
 
-    /** Refreshes a bounded visible window while using repository-wide status
-     * counts when supplied. This keeps sidebar totals exact without loading
-     * every historical Download object on every progress tick. */
+    /** Refreshes a bounded visible window using counts over the full history. */
     RefreshSummary refresh(List<Download> downloads, int totalCount,
-            java.util.Map<Download.Status, Integer> repositoryStatusCounts) {
+            Map<FilterBucket, Integer> repositoryCounts) {
         long totalBytes = 0;
         long doneBytes = 0;
 
@@ -348,22 +355,16 @@ final class DownloadListPresenter {
         }
         rowsById = Map.copyOf(currentRowsById);
 
-        int[] counts = repositoryStatusCounts == null
-                ? computeCounts(downloads)
-                : computeCounts(repositoryStatusCounts);
-        int[] categoryCounts = computeCategoryCounts(downloads);
-        if (!java.util.Arrays.equals(counts, lastStatusCounts)
-                || totalCount != lastStatusTotalCount) {
+        FilterCounts filterCounts = computeFilterCounts(repositoryCounts, categoryFilter, statusFilter);
+        String[] counts = filterCounts.statuses();
+        String[] categoryCounts = filterCounts.categories();
+        if (!java.util.Arrays.equals(counts, lastStatusCounts)) {
             lastStatusCounts = counts;
-            lastStatusTotalCount = totalCount;
-            rebuildFilterStore(statusStore, STATUS_FILTERS, counts, totalCount, statusFilter);
+            rebuildFilterStore(statusStore, STATUS_FILTERS, counts, statusFilter);
         }
-        if (!java.util.Arrays.equals(categoryCounts, lastCategoryCounts)
-                || downloads.size() != lastCategoryTotalCount) {
+        if (!java.util.Arrays.equals(categoryCounts, lastCategoryCounts)) {
             lastCategoryCounts = categoryCounts;
-            lastCategoryTotalCount = downloads.size();
-            rebuildFilterStore(categoryStore, CATEGORIES, categoryCounts, downloads.size(),
-                    categoryFilter);
+            rebuildFilterStore(categoryStore, CATEGORIES, categoryCounts, categoryFilter);
         }
 
         // Preserve selection while pagination extends the existing id prefix:
@@ -489,30 +490,90 @@ final class DownloadListPresenter {
      */
     static boolean matchesFilters(Download download, String searchText, String categoryFilter,
             String statusFilter) {
-        if (searchText != null && !searchText.isEmpty() && (download.getName() == null
-                || !download.getName().toLowerCase().contains(searchText))) {
-            return false;
-        }
-        // Category filter (extension-based, mirrors the approved old UI)
-        if (categoryFilter != null && !"All".equals(categoryFilter)
-                && !categoryFilter.equals(categoryOf(download))) {
-            return false;
-        }
+        return matchesSearch(download, searchText)
+                && matchesCategory(categoryOf(download), categoryFilter)
+                && matchesStatus(download.getStatus(), statusFilter);
+    }
+
+    private static boolean matchesSearch(Download download, String searchText) {
+        return searchText == null || searchText.isEmpty() || (download.getName() != null
+                && download.getName().toLowerCase().contains(searchText));
+    }
+
+    private static boolean matchesCategory(String category, String filter) {
+        return filter == null || "All".equals(filter) || filter.equals(category);
+    }
+
+    private static boolean matchesStatus(Download.Status status, String statusFilter) {
         return switch (statusFilter == null ? "All Status" : statusFilter) {
             case "All Status" -> true;
-            case "Active" -> download.getStatus() == Download.Status.STARTING
-                    || download.getStatus() == Download.Status.CONNECTING
-                    || download.getStatus() == Download.Status.DOWNLOADING
-                    || download.getStatus() == Download.Status.SEEDING;
-            case "Seeding" -> download.getStatus() == Download.Status.SEEDING;
-            case "Queued" -> download.getStatus() == Download.Status.CREATED
-                    || download.getStatus() == Download.Status.QUEUED;
-            case "Paused" -> download.getStatus() == Download.Status.PAUSED;
-            case "Finished" -> download.getStatus() == Download.Status.COMPLETED;
-            case "Error" -> download.getStatus() == Download.Status.ERROR;
-            case "Canceled" -> download.getStatus() == Download.Status.CANCELED;
+            case "Active" -> status == Download.Status.STARTING
+                    || status == Download.Status.CONNECTING
+                    || status == Download.Status.DOWNLOADING
+                    || status == Download.Status.SEEDING;
+            case "Seeding" -> status == Download.Status.SEEDING;
+            case "Queued" -> status == Download.Status.CREATED || status == Download.Status.QUEUED;
+            case "Paused" -> status == Download.Status.PAUSED;
+            case "Finished" -> status == Download.Status.COMPLETED;
+            case "Error" -> status == Download.Status.ERROR;
+            case "Canceled" -> status == Download.Status.CANCELED;
             default -> true;
         };
+    }
+
+    static FilterBucket filterBucket(Download download, String searchText) {
+        return new FilterBucket(categoryOf(download), download.getStatus(), matchesSearch(download, searchText));
+    }
+
+    static Map<FilterBucket, Integer> computeFilterBuckets(Collection<Download> downloads, String searchText) {
+        Map<FilterBucket, Integer> buckets = new HashMap<>();
+        for (Download download : downloads) {
+            buckets.merge(filterBucket(download, searchText), 1, Integer::sum);
+        }
+        return Map.copyOf(buckets);
+    }
+
+    /** Each sidebar group respects the other group, but excludes its own selection. */
+    static FilterCounts computeFilterCounts(Map<FilterBucket, Integer> buckets,
+            String categoryFilter, String statusFilter) {
+        int[] statuses = new int[STATUS_FILTERS.length];
+        int[] globalStatuses = new int[STATUS_FILTERS.length];
+        int[] categories = new int[CATEGORIES.length];
+        int[] globalCategories = new int[CATEGORIES.length];
+        for (var entry : buckets.entrySet()) {
+            FilterBucket bucket = entry.getKey();
+            int count = entry.getValue();
+            boolean categoryMatches = matchesCategory(bucket.category(), categoryFilter);
+            boolean statusMatches = matchesStatus(bucket.status(), statusFilter);
+            for (int i = 0; i < STATUS_FILTERS.length; i++) {
+                if (matchesStatus(bucket.status(), STATUS_FILTERS[i])) {
+                    globalStatuses[i] += count;
+                    if (bucket.matchesSearch() && categoryMatches) {
+                        statuses[i] += count;
+                    }
+                }
+            }
+            for (int i = 0; i < CATEGORIES.length; i++) {
+                if (matchesCategory(bucket.category(), CATEGORIES[i])) {
+                    globalCategories[i] += count;
+                    if (bucket.matchesSearch() && statusMatches) {
+                        categories[i] += count;
+                    }
+                }
+            }
+        }
+        return new FilterCounts(formatFilterCounts(statuses, globalStatuses),
+                formatFilterCounts(categories, globalCategories));
+    }
+
+    private static String[] formatFilterCounts(int[] contextual, int[] global) {
+        String[] counts = new String[contextual.length];
+        for (int i = 0; i < counts.length; i++) {
+            counts[i] = contextual[i] == global[i]
+                    ? Integer.toString(global[i])
+                    : contextual[i] + "/" + global[i];
+        }
+        return counts;
     }
 
     /** Counts per status filter, index-aligned with STATUS_FILTERS (minus "All Status"). */
@@ -693,34 +754,38 @@ final class DownloadListPresenter {
         } while (downloadsStore.iterNext(iter));
     }
 
-    private void rebuildFilterStore(ListStore store, String[] labels, int[] counts, int total,
+    private void rebuildFilterStore(ListStore store, String[] labels, String[] counts,
             String selected) {
-        store.clear();
-        for (int i = 0; i < labels.length; i++) {
-            int count = store == statusStore
-                    ? (i == 0 ? total : (i - 1 < counts.length ? counts[i - 1] : 0))
-                    : (i < counts.length ? counts[i] : 0);
-            TreeIter iter = new TreeIter();
-            store.append(iter);
-            ListStoreCells.setString(store, iter, SC_ICON, iconForFilterRow(labels[i]));
-            ListStoreCells.setInt(store, iter, SC_COUNT, count);
-            ListStoreCells.setString(store, iter, SC_LABEL, I18n.tr(labels[i]));
-            if (labels[i].equals(selected)) {
-                if (store == statusStore) {
-                    suppressStatusSelection = true;
-                    try {
+        // Clearing and repopulating can also emit selection changes (including
+        // a temporary selection of All). Guard the whole rebuild, not just the
+        // final re-selection, so counts never change the user's active filter.
+        boolean status = store == statusStore;
+        if (status) {
+            suppressStatusSelection = true;
+        } else {
+            suppressCategorySelection = true;
+        }
+        try {
+            store.clear();
+            for (int i = 0; i < labels.length; i++) {
+                TreeIter iter = new TreeIter();
+                store.append(iter);
+                ListStoreCells.setString(store, iter, SC_ICON, iconForFilterRow(labels[i]));
+                ListStoreCells.setString(store, iter, SC_COUNT, counts[i]);
+                ListStoreCells.setString(store, iter, SC_LABEL, I18n.tr(labels[i]));
+                if (labels[i].equals(selected)) {
+                    if (status) {
                         statusTreeview.getSelection().selectIter(iter);
-                    } finally {
-                        suppressStatusSelection = false;
-                    }
-                } else {
-                    suppressCategorySelection = true;
-                    try {
+                    } else {
                         categoryTreeview.getSelection().selectIter(iter);
-                    } finally {
-                        suppressCategorySelection = false;
                     }
                 }
+            }
+        } finally {
+            if (status) {
+                suppressStatusSelection = false;
+            } else {
+                suppressCategorySelection = false;
             }
         }
     }

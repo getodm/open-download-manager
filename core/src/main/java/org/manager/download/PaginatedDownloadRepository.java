@@ -524,6 +524,24 @@ public class PaginatedDownloadRepository {
         }
     }
 
+    /** Counts groups without materializing or caching an unbounded result list. */
+    public <K> Map<K, Integer> getDownloadCounts(java.util.function.Function<Download, K> classifier) {
+        Objects.requireNonNull(classifier, "classifier");
+        lock.readLock().lock();
+        try {
+            Map<K, Integer> counts = new HashMap<>();
+            for (Download download : downloads.values()) {
+                K key = classifier.apply(download);
+                if (key != null) {
+                    counts.merge(key, 1, Integer::sum);
+                }
+            }
+            return Map.copyOf(counts);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
     /**
      * Gets the count of downloads with a specific status.
      *
